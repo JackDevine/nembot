@@ -67,6 +67,12 @@ downloaded are faded. Open a table to see its description, keys and column
 docs (hover over a column header), its row count and date range, when it was
 downloaded, and a filterable, paged view of the data.
 
+Use **Download…** on any table to fetch months from AEMO (with a size estimate;
+some tables are many GB per month). **Refresh** fetches the months published
+since your last download; tables with newer published data are marked with ●.
+Downloads run in the background with progress and a Cancel button. The web app
+holds the database open for writing, so stop it before using the CLI.
+
 ## Behavior
 
 - Data is appended cumulatively; reruns of the same window are idempotent.

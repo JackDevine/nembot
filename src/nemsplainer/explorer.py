@@ -23,9 +23,13 @@ def _jsonable(value):
 
 
 def _downloaded(cursor) -> dict[str, int]:
-    """Tables present in the database, with DuckDB's (cheap) estimated row counts."""
+    """Non-empty tables in the database, with DuckDB's (cheap) estimated row counts.
+
+    A cancelled first download leaves an empty table behind; that still counts
+    as not downloaded.
+    """
     rows = cursor.execute("SELECT table_name, estimated_size FROM duckdb_tables() "
-                          "WHERE schema_name = 'main' AND NOT temporary").fetchall()
+                          "WHERE schema_name = 'main' AND NOT temporary AND estimated_size > 0").fetchall()
     return {name.upper(): size for name, size in rows}
 
 

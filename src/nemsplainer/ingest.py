@@ -1,18 +1,25 @@
 """Persistent, cumulative monthly MMS ingestion. Connections belong to callers."""
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 
 import duckdb
 
 from . import nemweb
+from . import catalog
 from .tables import DEFAULT_TABLES, TABLES, Table
 
-# Tables the loader's window filtering and diagnostics handle today.
-SUPPORTED = DEFAULT_TABLES
+# Any table the monthly archive publishes can be loaded.
+SUPPORTED = tuple(name for name, entry in catalog.tables().items() if entry['in_archive'])
+# Interval tables whose rows are filtered to the exact requested market days.
+# Every other table is loaded a whole archive month at a time, because the
+# meaning of its timestamp (interval ending, trading day, run time...) varies.
+EXACT_WINDOW = ('DISPATCHPRICE', 'DISPATCHREGIONSUM', 'DISPATCH_UNIT_SCADA')
+TIMESTAMP_FORMATS = "['%Y/%m/%d %H:%M:%S', '%Y/%m/%d %H:%M:%S.%g']"  # TIMESTAMP(n) has milliseconds
 
 MARKET_TIME = timezone(timedelta(hours=10))
 
@@ -40,7 +47,7 @@ def validate_inputs(tables, start_date=None, end_date=None, *, database="data/ne
     names = []
     for name in tables:
         if not isinstance(name, str) or name.upper() not in SUPPORTED:
-            raise ValueError(f"Unsupported MMS table: {name!r}; choose {', '.join(SUPPORTED)}")
+            raise ValueError(f"Unsupported MMS table: {name!r}; it is not published in the MMSDM monthly archive")
         if name.upper() not in names:
             names.append(name.upper())
     start, end = _date(start_date, "start"), _date(end_date, "end")
@@ -77,7 +84,7 @@ def resolve_sources(names, start, end):
         files = nemweb.month_files(month.year, month.month, names)
         for name in names:
             for url in files[name]:
-                sources.append((name, url))
+                sources.append((name, url, month))
         month = _month_shift(month, 1)
     return start, end, sources
 
@@ -101,15 +108,21 @@ def _create_table(c, table: Table, name=None, temporary=False):
 
 def _merge(c, table, target, csv_path, supplied, context):
     """Bulk cast, reject tied contradictions, and apply only newer supplied values."""
-    types = {name: table.columns[name] for name in supplied}
+    # Timestamps are read as text and parsed with either format (with or without milliseconds).
+    types = {name: 'VARCHAR' if table.columns[name] == 'TIMESTAMP' else table.columns[name] for name in supplied}
+    casts = ', '.join(f'strptime({_q(n)}, {TIMESTAMP_FORMATS}) AS {_q(n)}' if table.columns[n] == 'TIMESTAMP' else _q(n)
+                      for n in supplied)
     c.execute('DROP TABLE IF EXISTS _stage')
     try:
         c.read_csv(str(csv_path), header=True, columns=types, auto_detect=False,
-                   delimiter=',', quotechar='"', escapechar='"', na_values=[''],
-                   timestamp_format='%Y/%m/%d %H:%M:%S').create('_stage')
+                   delimiter=',', quotechar='"', escapechar='"', na_values=['']).create_view('_typed', replace=True)
+        c.execute(f'CREATE TEMP TABLE _stage AS SELECT {casts} FROM _typed')
     except duckdb.Error as exc:
         raise RuntimeError(f"{context}: invalid typed CSV values: {exc}") from exc
+    finally:
+        c.execute('DROP VIEW IF EXISTS _typed')
     keys = ', '.join(map(_q, table.primary_key))
+    tracked = 'LASTCHANGED' in table.columns  # a few tables have no LASTCHANGED at all
     if 'LASTCHANGED' not in supplied:
         c.execute('ALTER TABLE _stage ADD COLUMN LASTCHANGED TIMESTAMP')
     key_null = ' OR '.join(f'{_q(k)} IS NULL' for k in table.primary_key)
@@ -123,10 +136,13 @@ def _merge(c, table, target, csv_path, supplied, context):
         raise RuntimeError(f"{context}: conflicting equal-LASTCHANGED records for key {conflict}")
     match = ' AND '.join(f't.{_q(k)}=s.{_q(k)}' for k in table.primary_key)
     differences = ' OR '.join(f't.{_q(k)} IS DISTINCT FROM s.{_q(k)}' for k in supplied if k not in table.primary_key) or 'false'
-    conflict = c.execute(f'SELECT {", ".join("s."+_q(k) for k in table.primary_key)} FROM _winners s JOIN {_q(target)} t ON {match} WHERE t.LASTCHANGED IS NOT DISTINCT FROM s.LASTCHANGED AND ({differences}) LIMIT 1').fetchone()
-    if conflict:
-        raise RuntimeError(f"{context}: conflicting equal-LASTCHANGED records against stored key {conflict}")
-    newer = 's.LASTCHANGED IS NOT NULL AND (t.LASTCHANGED IS NULL OR s.LASTCHANGED>t.LASTCHANGED)'
+    if tracked:
+        conflict = c.execute(f'SELECT {", ".join("s."+_q(k) for k in table.primary_key)} FROM _winners s JOIN {_q(target)} t ON {match} WHERE t.LASTCHANGED IS NOT DISTINCT FROM s.LASTCHANGED AND ({differences}) LIMIT 1').fetchone()
+        if conflict:
+            raise RuntimeError(f"{context}: conflicting equal-LASTCHANGED records against stored key {conflict}")
+        newer = 's.LASTCHANGED IS NOT NULL AND (t.LASTCHANGED IS NULL OR s.LASTCHANGED>t.LASTCHANGED)'
+    else:
+        newer = 'true'  # no change tracking: the most recently loaded archive wins
     updates = ', '.join(f'{_q(k)}=s.{_q(k)}' for k in supplied if k not in table.primary_key)
     column_sql = ', '.join(map(_q, supplied))
     value_sql = ', '.join('s.' + _q(k) for k in supplied)
@@ -165,10 +181,13 @@ def _load_file(c, table, target, path, directory, url, lower=None, upper=None):
 
 def _diagnostics(c, names, lower, upper):
     for name in names:
-        timestamp = 'LASTCHANGED' if name == 'DUDETAILSUMMARY' else 'SETTLEMENTDATE'
+        timestamp = 'LASTCHANGED' if name == 'DUDETAILSUMMARY' else catalog.time_column(name)
+        if timestamp is None:
+            print(f'{name}: rows={c.execute(f"SELECT count(*) FROM {_q(name)}").fetchone()[0]:,}', flush=True)
+            continue
         row = c.execute(f'SELECT count(*), min({_q(timestamp)}), max({_q(timestamp)}) FROM {_q(name)}').fetchone()
         print(f'{name}: rows={row[0]:,} {timestamp}={row[1]} .. {row[2]}', flush=True)
-        if name == 'DUDETAILSUMMARY':
+        if name not in EXACT_WINDOW:
             continue
         expected = "SELECT endpoint FROM generate_series(?::TIMESTAMP + INTERVAL 5 MINUTE, ?::TIMESTAMP, INTERVAL 5 MINUTE) x(endpoint)"
         if name in ('DISPATCHPRICE', 'DISPATCHREGIONSUM'):
@@ -180,6 +199,10 @@ def _diagnostics(c, names, lower, upper):
         print(f'{name}: missing {unit}={missing}', file=sys.stderr if missing else sys.stdout, flush=True)
 
 
+def _month_window(month: date) -> tuple[datetime, datetime]:
+    return datetime.combine(month, time()), datetime.combine(_month_shift(month, 1), time())
+
+
 def load_mms(
     tables: Sequence[str],
     start_date: date | str | None = None,
@@ -187,19 +210,37 @@ def load_mms(
     *,
     database: str | Path = 'data/nem.duckdb',
     cache_dir: str | Path = 'data/cache',
+    connection: duckdb.DuckDBPyConnection | None = None,
+    progress: Callable[[dict], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """Load monthly public MMS archives for inclusive UTC+10 calendar dates.
 
     Omitted dates select three complete published months. Existing history is
-    retained. The returned writable connection must be closed by the caller.
+    retained. `EXACT_WINDOW` tables are filtered to the requested days; other
+    tables load whole archive months. Without ``connection`` a new writable
+    connection is opened and returned (the caller must close it); with one,
+    the load runs on a cursor of it and that connection is returned. Each
+    file commits separately, so a cancelled (``cancel``) or failed load keeps
+    the files already finished. ``progress`` receives event dicts.
     """
+    report = progress or (lambda event: None)
     names, start, end, database, cache = validate_inputs(tables, start_date, end_date, database=database, cache_dir=cache_dir)
+    report({'stage': 'listing'})
     start, end, sources = resolve_sources(names, start, end)
     lower, upper = datetime.combine(start, time()), datetime.combine(end + timedelta(days=1), time())
     print(f'Market dates: {start} through {end}; monthly sources only', flush=True)
+    report({'stage': 'resolved', 'start': start.isoformat(), 'end': end.isoformat(), 'files': len(sources),
+            'size': sum(nemweb.file_size(url) or 0 for _, url, _ in sources)})
     database.parent.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
-    c = duckdb.connect(str(database))
+    owned = connection is None
+    c = duckdb.connect(str(database)) if owned else connection.cursor()
+
+    def check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise nemweb.Cancelled('Download cancelled')
+
     try:
         c.execute("SET memory_limit='2GB'")
         c.execute('SET threads=4')
@@ -210,49 +251,73 @@ def load_mms(
         references = []
         with tempfile.TemporaryDirectory(prefix='staging-', dir=cache) as scratch:
             c.execute('SET temp_directory=?', [scratch])
-            for name, url in sources:
-                print(f'{name}: {url}', flush=True)
-                path, digest = nemweb.download(url, cache)
-                if name == 'DUDETAILSUMMARY':
-                    references.append((path, digest, url))
-                    continue
-                if _completed(c, name, url, digest, lower, upper):
-                    continue
-                c.execute('BEGIN')
-                try:
-                    with tempfile.TemporaryDirectory(dir=scratch) as normalized:
-                        _load_file(c, TABLES[name], name, path, Path(normalized), url, lower, upper)
-                    _mark(c, name, url, digest, lower, upper)
-                    c.execute('COMMIT')
-                except BaseException:
-                    c.execute('ROLLBACK')
-                    raise
-            # Reference snapshots must be reconciled across all months BEFORE
-            # overlap selection, otherwise a later closure can resurrect an old row.
-            if references and not all(_completed(c, 'DUDETAILSUMMARY', url, digest, lower, upper) for _, digest, url in references):
-                table = TABLES['DUDETAILSUMMARY']
-                c.execute('BEGIN')
-                try:
-                    _create_table(c, table, '_reference', temporary=True)
-                    c.execute('INSERT INTO _reference SELECT * FROM DUDETAILSUMMARY')
-                    for path, digest, url in references:
+            try:
+                for index, (name, url, month) in enumerate(sources, 1):
+                    check_cancel()
+                    print(f'{name}: {url}', flush=True)
+                    event = {'stage': 'download', 'table': name, 'url': url, 'month': month.isoformat()[:7],
+                             'file': index, 'files': len(sources), 'bytes': 0, 'size': nemweb.file_size(url)}
+                    report(event)
+                    path, digest = nemweb.download(url, cache, progress=lambda n: report({**event, 'bytes': n}),
+                                                   cancel=cancel)
+                    if name == 'DUDETAILSUMMARY':
+                        references.append((path, digest, url))
+                        continue
+                    window = (lower, upper) if name in EXACT_WINDOW else _month_window(month)
+                    if _completed(c, name, url, digest, *window):
+                        continue
+                    check_cancel()
+                    report({**event, 'stage': 'load'})
+                    c.execute('BEGIN')
+                    try:
                         with tempfile.TemporaryDirectory(dir=scratch) as normalized:
-                            _load_file(c, table, '_reference', path, Path(normalized), url)
-                    match = ' AND '.join(f't.{_q(k)}=s.{_q(k)}' for k in table.primary_key)
-                    updates = ', '.join(f'{_q(k)}=s.{_q(k)}' for k in table.columns if k not in table.primary_key)
-                    all_columns = ', '.join(map(_q, table.columns))
-                    all_values = ', '.join('s.' + _q(k) for k in table.columns)
-                    c.execute(f'MERGE INTO DUDETAILSUMMARY t USING _reference s ON {match} WHEN MATCHED THEN UPDATE SET {updates} WHEN NOT MATCHED AND s.START_DATE < ? AND (s.END_DATE IS NULL OR s.END_DATE > ?) THEN INSERT ({all_columns}) VALUES ({all_values})', [upper, lower])
-                    for _, digest, url in references:
-                        _mark(c, table.name, url, digest, lower, upper)
-                    c.execute('DROP TABLE _reference')
-                    c.execute('COMMIT')
-                except BaseException:
-                    c.execute('ROLLBACK')
-                    raise
-            _diagnostics(c, names, lower, upper)
-        c.execute('CHECKPOINT')
-        return c
+                            if name in EXACT_WINDOW:
+                                _load_file(c, TABLES[name], name, path, Path(normalized), url, lower, upper)
+                            else:
+                                _load_file(c, TABLES[name], name, path, Path(normalized), url)
+                        _mark(c, name, url, digest, *window)
+                        c.execute('COMMIT')
+                    except BaseException:
+                        c.execute('ROLLBACK')
+                        raise
+                # Reference snapshots must be reconciled across all months BEFORE
+                # overlap selection, otherwise a later closure can resurrect an old row.
+                if references and not all(_completed(c, 'DUDETAILSUMMARY', url, digest, lower, upper) for _, digest, url in references):
+                    check_cancel()
+                    report({'stage': 'load', 'table': 'DUDETAILSUMMARY'})
+                    table = TABLES['DUDETAILSUMMARY']
+                    c.execute('BEGIN')
+                    try:
+                        _create_table(c, table, '_reference', temporary=True)
+                        c.execute('INSERT INTO _reference SELECT * FROM DUDETAILSUMMARY')
+                        for path, digest, url in references:
+                            with tempfile.TemporaryDirectory(dir=scratch) as normalized:
+                                _load_file(c, table, '_reference', path, Path(normalized), url)
+                        match = ' AND '.join(f't.{_q(k)}=s.{_q(k)}' for k in table.primary_key)
+                        updates = ', '.join(f'{_q(k)}=s.{_q(k)}' for k in table.columns if k not in table.primary_key)
+                        all_columns = ', '.join(map(_q, table.columns))
+                        all_values = ', '.join('s.' + _q(k) for k in table.columns)
+                        c.execute(f'MERGE INTO DUDETAILSUMMARY t USING _reference s ON {match} WHEN MATCHED THEN UPDATE SET {updates} WHEN NOT MATCHED AND s.START_DATE < ? AND (s.END_DATE IS NULL OR s.END_DATE > ?) THEN INSERT ({all_columns}) VALUES ({all_values})', [upper, lower])
+                        for _, digest, url in references:
+                            _mark(c, table.name, url, digest, lower, upper)
+                        c.execute('DROP TABLE _reference')
+                        c.execute('COMMIT')
+                    except BaseException:
+                        c.execute('ROLLBACK')
+                        raise
+                _diagnostics(c, names, lower, upper)
+            finally:
+                c.execute('RESET temp_directory')  # the scratch directory is about to be deleted
+        try:
+            c.execute('CHECKPOINT')
+        except duckdb.Error:
+            if owned:
+                raise  # a shared database may have readers mid-transaction; it checkpoints later
+        report({'stage': 'done'})
+        if owned:
+            return c
+        c.close()
+        return connection
     except BaseException:
         c.close()
         raise

@@ -43,6 +43,7 @@ _listings: dict[str, tuple[float, list[str]]] = {}
 
 def clear_cache() -> None:
     _listings.clear()
+    _sizes.clear()
 
 
 def _retry_delay(exc: Exception, attempt: int) -> float | None:
@@ -84,16 +85,35 @@ class _Unavailable(RuntimeError):
     """A listed month lacks one or more requested table archives."""
 
 
+class Cancelled(Exception):
+    """The caller cancelled a download (deliberately not a RuntimeError)."""
+
+
+_sizes: dict[str, int] = {}  # file URL -> size in bytes, from directory listings
+
+
+def file_size(url: str) -> int | None:
+    return _sizes.get(url)
+
+
 class _Links(HTMLParser):
     def __init__(self):
         super().__init__()
         self.hrefs = []
+        self.sizes = {}  # IIS listings print "<date> <time> <bytes> <A HREF=...>"
+        self._text = ''
+
+    def handle_data(self, data):
+        self._text += data
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() == 'a':
             for key, value in attrs:
                 if key.lower() == 'href' and value is not None:
                     self.hrefs.append(value)
+                    if match := re.search(r'(\d+)\s*$', self._text):
+                        self.sizes[value] = int(match[1])
+        self._text = ''
 
 
 def _listing(url: str) -> list[str]:
@@ -115,6 +135,7 @@ def _listing(url: str) -> list[str]:
     for href in parser.hrefs:
         # IIS listings sometimes include literal filename # characters.
         joined = urllib.parse.urljoin(url, href.replace('#', '%23'))
+        size = parser.sizes.get(href)
         parts = urllib.parse.urlsplit(joined)
         path = urllib.parse.unquote(parts.path)
         if (parts.scheme != base.scheme or parts.netloc != base.netloc
@@ -124,8 +145,10 @@ def _listing(url: str) -> list[str]:
         if not child or '/' in child.rstrip('/') or child.rstrip('/') in ('.', '..'):
             continue
         # Canonical escaping also prevents encoded slashes/traversal escaping scope.
-        links.add(urllib.parse.urlunsplit((parts.scheme, parts.netloc,
-                  urllib.parse.quote(path, safe='/'), '', '')))
+        link = urllib.parse.urlunsplit((parts.scheme, parts.netloc, urllib.parse.quote(path, safe='/'), '', ''))
+        links.add(link)
+        if size is not None:
+            _sizes[link] = size
     _listings[url] = (time.monotonic(), sorted(links))
     return sorted(links)
 
@@ -197,8 +220,13 @@ def _validate_zip(path: Path) -> str:
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
-def download(url: str, cache_dir: Path) -> tuple[Path, str]:
-    """Stream to an incomplete path; publish only after ZIP CRC validation."""
+def download(url: str, cache_dir: Path, progress: Callable[[int], None] | None = None,
+             cancel: threading.Event | None = None) -> tuple[Path, str]:
+    """Stream to an incomplete path; publish only after ZIP CRC validation.
+
+    ``progress`` receives the bytes written so far; setting ``cancel`` aborts
+    the transfer with :class:`Cancelled` (the partial file is discarded).
+    """
     path = Path(cache_dir) / (hashlib.sha256(url.encode('utf-8')).hexdigest() + '.zip')
     partial = path.with_suffix('.zip.part')
     try:
@@ -210,9 +238,15 @@ def download(url: str, cache_dir: Path) -> tuple[Path, str]:
                 path.unlink(missing_ok=True)
                 raise RuntimeError(f'invalid cached ZIP removed: {exc}') from exc
         def save(response):
+            written = 0
             with partial.open('wb') as target:
                 while chunk := response.read(1024 * 1024):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled(f'{url}: download cancelled')
                     target.write(chunk)
+                    written += len(chunk)
+                    if progress:
+                        progress(written)
 
         _polite(url, save)  # a retry rewrites the partial file from scratch
         digest = _validate_zip(partial)
@@ -233,8 +267,9 @@ def _value(value: str, kind: str) -> None:
             raise ValueError('non-finite number')
         return
     if kind == 'TIMESTAMP':
-        if not re.fullmatch(r'[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}', value):
-            raise ValueError('expected YYYY/MM/DD HH:MM:SS')
+        # TIMESTAMP(n) columns carry fractional seconds, e.g. 2023/03/15 08:56:34.657.
+        if not re.fullmatch(r'[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?', value):
+            raise ValueError('expected YYYY/MM/DD HH:MM:SS[.fff]')
         datetime.fromisoformat(value.replace('/', '-'))
         return
     number = Decimal(value)

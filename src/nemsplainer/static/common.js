@@ -1,5 +1,12 @@
 // Shared DOM and rendering helpers (classic script: globals shared with chat.js/explorer.js).
 
+async function getJSON(url) {
+  const response = await fetch(url);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  return body;
+}
+
 function el(tag, cls, text) {
   const node = document.createElement(tag);
   if (cls) node.className = cls;

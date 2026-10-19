@@ -2,6 +2,7 @@
 
 const explorer = {
   overview: null,      // /api/explorer response
+  freshness: {},       // table -> {loaded, latest, stale}
   current: null,       // name of the open table
   detail: null,        // /api/explorer/tables/<name> response
   query: null,         // data-view filters and paging
@@ -32,13 +33,6 @@ function sourceLink(source, text) {
   return a;
 }
 
-async function getJSON(url) {
-  const response = await fetch(url);
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-  return body;
-}
-
 // ---- Sidebar ----
 
 function drawCatalog() {
@@ -62,9 +56,11 @@ function drawCatalog() {
     box.append(summary);
     box.open = Boolean(query) || downloadedOnly.checked || tables.some(t => t.name === explorer.current);
     for (const t of tables) {
-      const link = el('a', 'table-link' + (t.downloaded ? '' : ' missing') + (t.name === explorer.current ? ' current' : ''));
+      const fresh = explorer.freshness[t.name];
+      const stale = t.downloaded && fresh && fresh.stale;
+      const link = el('a', 'table-link' + (t.downloaded ? '' : ' missing') + (stale ? ' stale' : '') + (t.name === explorer.current ? ' current' : ''));
       link.href = `#explorer/${t.name}`;
-      link.title = (t.downloaded ? '' : 'Not downloaded yet. ') + t.comment;
+      link.title = (t.downloaded ? '' : 'Not downloaded yet. ') + (stale ? `Newer data published: you have up to ${fresh.loaded}, AEMO has ${fresh.latest}. ` : '') + t.comment;
       link.append(el('span', '', t.name), el('span', 'rows', t.downloaded ? compactNumber(t.rows) : ''));
       box.append(link);
     }
@@ -161,8 +157,9 @@ function drawTable() {
     : `What does the ${d.name} table contain, and what questions could it help me answer?`);
   title.append(el('h2', '', d.name), el('span', 'badge', KIND_LABELS[d.kind]),
     el('span', d.downloaded ? 'badge ok' : 'badge missing', d.downloaded ? 'downloaded' : 'not downloaded'),
-    el('span', 'spacer'), ask, help);
+    el('span', 'spacer'), el('span', 'actions'), ask, help);
   tableView.append(title, el('p', 'comment', d.comment));
+  drawActions(d, title.querySelector('.actions'));
 
   const facts = el('div', 'facts');
   const fact = (label, value) => { const f = el('span', '', `${label}: `); f.append(el('b', '', value)); facts.append(f); };
@@ -174,11 +171,12 @@ function drawTable() {
   } else if (d.time_column) {
     fact('Time column', d.time_column);
   }
-  tableView.append(facts);
+  tableView.append(facts, el('div', 'job-slot'));
+  drawJobSlot();
   if (explorer.docsOpen) tableView.append(docsPanel(d));
 
   if (!d.downloaded) {
-    tableView.append(el('p', 'empty', 'This table has not been downloaded yet.'));
+    tableView.append(el('p', 'empty', 'This table has not been downloaded yet. Use Download… to choose which months to fetch from AEMO.'));
     if (!explorer.docsOpen) tableView.append(el('h3', '', 'Columns'), columnsTable(d));
     return;
   }
@@ -262,9 +260,87 @@ async function loadRows() {
   pager.replaceChildren(prev, el('span', '', `Rows ${first.toLocaleString()}–${last.toLocaleString()} of ${data.total.toLocaleString()}`), next);
 }
 
+// Download / Refresh / Download more buttons, from the table's download plan.
+async function drawActions(d, slot) {
+  slot.replaceChildren(el('span', 'muted', 'Checking AEMO for published months…'));
+  let plan;
+  try {
+    plan = await downloadPlan(d.name);
+  } catch (err) {
+    slot.replaceChildren(el('span', 'error', `Can't reach NEMWEB: ${err.message}`));
+    return;
+  }
+  if (explorer.detail !== d) return;
+  const buttons = [];
+  const busy = downloads.jobs.some(j => j.table === d.name && ['queued', 'running'].includes(j.status));
+  if (!d.downloaded) {
+    const b = el('button', 'primary', 'Download…');
+    b.onclick = () => downloadDialog(plan);
+    buttons.push(b);
+  } else {
+    if (plan.refresh) {
+      const b = el('button', 'primary', `Refresh (${plan.refresh.start === plan.refresh.end ? plan.refresh.end : `${plan.refresh.start} to ${plan.refresh.end}`})`);
+      b.title = `Download the months published since your last download (you have up to ${plan.loaded_months.at(-1)}).`;
+      b.onclick = async () => {
+        b.disabled = true;
+        try { await startDownload(d.name, plan.refresh.start, plan.refresh.end); }
+        catch (err) { alert(err.message); b.disabled = false; }
+      };
+      buttons.push(b);
+    } else if (plan.up_to_date) {
+      const b = el('button', '', 'Up to date');
+      b.disabled = true;
+      b.title = `You have the latest published month (${plan.latest_month}).`;
+      buttons.push(b);
+    }
+    const more = el('button', '', 'Download more…');
+    more.onclick = () => downloadDialog(plan, { start: shiftMonth(plan.latest_month, -2), title: `Download more ${d.name}` });
+    buttons.push(more);
+  }
+  buttons.forEach(b => { if (busy) b.disabled = true; });
+  slot.replaceChildren(...buttons);
+}
+
+function drawJobSlot() {
+  const slot = tableView.querySelector('.job-slot');
+  if (!slot || !explorer.detail) return;
+  const panel = jobPanel(explorer.detail.name);
+  slot.replaceChildren(...(panel ? [panel] : []));
+}
+
+async function loadFreshness() {
+  try {
+    explorer.freshness = (await getJSON('/api/explorer/freshness')).tables;
+    drawCatalog();
+  } catch (err) { console.warn('freshness unavailable', err); }
+}
+
+onDownloadsChange(async finished => {
+  drawJobSlot();
+  const current = explorer.detail && explorer.detail.name;
+  const busy = current && downloads.jobs.some(j => j.table === current && ['queued', 'running'].includes(j.status));
+  const actions = tableView.querySelector('.actions');
+  if (actions) actions.querySelectorAll('button').forEach(b => { if (busy) b.disabled = true; });
+  if (!finished.length || !explorer.overview) return;
+  // Reload what a finished job changed: the sidebar, freshness and the open table.
+  explorer.overview = await getJSON('/api/explorer');
+  for (const job of finished) delete downloads.plans[job.table];
+  if (current && finished.some(j => j.table === current)) {
+    explorer.detail = await getJSON(`/api/explorer/tables/${encodeURIComponent(current)}`);
+    drawTable();
+  } else if (actions && current) {
+    drawActions(explorer.detail, actions);
+  }
+  drawCatalog();
+  loadFreshness();
+});
+
 async function showExplorer(name) {
   try {
-    if (!explorer.overview) explorer.overview = await getJSON('/api/explorer');
+    if (!explorer.overview) {
+      explorer.overview = await getJSON('/api/explorer');
+      loadFreshness();
+    }
     if (name !== explorer.current || !explorer.detail) {
       explorer.current = name;
       explorer.detail = null;

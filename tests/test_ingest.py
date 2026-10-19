@@ -172,7 +172,7 @@ class IngestTests(unittest.TestCase):
         self.addCleanup(interval_patch.stop)
         nemweb.clear_cache()
         self.addCleanup(nemweb.clear_cache)
-        network_patch = patch("urllib.request.urlopen", side_effect=self.network.open)
+        network_patch = patch("nemsplainer.nemweb._open", side_effect=self.network.open)
         self.urlopen = network_patch.start()
         self.addCleanup(network_patch.stop)
         self.stdout = StringIO()

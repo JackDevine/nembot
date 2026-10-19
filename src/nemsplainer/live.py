@@ -143,10 +143,17 @@ def load(db: duckdb.DuckDBPyConnection, table: str, files: list[dict], cache_dir
     schema = replace(TABLES[table], dataset=feed.identity[0], csv_table=feed.identity[1])
     cache_dir.mkdir(parents=True, exist_ok=True)
     c = db.cursor()
+    downloads = None
     try:
         c.execute('CREATE SCHEMA IF NOT EXISTS _nemsplainer')
         c.execute('CREATE TABLE IF NOT EXISTS _nemsplainer.files (url VARCHAR, sha256 VARCHAR, table_name VARCHAR, window_start TIMESTAMP, window_end TIMESTAMP, processed_at TIMESTAMP, PRIMARY KEY(url,sha256,table_name,window_start,window_end))')
         _create_table(c, schema, table)
+        current = {}
+
+        def on_bytes(url, n):  # only the file being waited for reports progress
+            if current.get('url') == url:
+                report({**current['event'], 'bytes': n})
+        downloads = nemweb.download_many([f['url'] for f in files], cache_dir, progress=on_bytes, cancel=cancel)
         with tempfile.TemporaryDirectory(prefix='live-', dir=cache_dir) as scratch:
             for index, file in enumerate(files, 1):
                 if cancel is not None and cancel.is_set():
@@ -154,9 +161,9 @@ def load(db: duckdb.DuckDBPyConnection, table: str, files: list[dict], cache_dir
                 url = file['url']
                 event = {'stage': 'download', 'table': table, 'url': url, 'month': file['start'][:10],
                          'file': index, 'files': len(files), 'bytes': 0, 'size': nemweb.file_size(url)}
+                current.update(url=url, event=event)
                 report(event)
-                path, digest = nemweb.download(url, cache_dir, progress=lambda n: report({**event, 'bytes': n}),
-                                               cancel=cancel)
+                _, path, digest = next(downloads)
                 window = (datetime.fromisoformat(file['start']), datetime.fromisoformat(file['end']))
                 if _completed(c, table, url, digest, *window):
                     continue
@@ -172,4 +179,6 @@ def load(db: duckdb.DuckDBPyConnection, table: str, files: list[dict], cache_dir
                     raise
         report({'stage': 'done'})
     finally:
+        if downloads is not None:
+            downloads.close()
         c.close()

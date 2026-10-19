@@ -37,7 +37,7 @@ def _():
 
 @app.cell
 def _(duckdb):
-    mms = duckdb.connect("data/nem.duckdb")
+    mms = duckdb.connect("data/nem.duckdb", read_only=True)
     mms
     return (mms,)
 

@@ -251,15 +251,21 @@ def load_mms(
         references = []
         with tempfile.TemporaryDirectory(prefix='staging-', dir=cache) as scratch:
             c.execute('SET temp_directory=?', [scratch])
+            current = {}
+
+            def on_bytes(url, n):  # only the file being waited for reports progress
+                if current.get('url') == url:
+                    report({**current['event'], 'bytes': n})
+            downloads = nemweb.download_many([url for _, url, _ in sources], cache, progress=on_bytes, cancel=cancel)
             try:
                 for index, (name, url, month) in enumerate(sources, 1):
                     check_cancel()
                     print(f'{name}: {url}', flush=True)
                     event = {'stage': 'download', 'table': name, 'url': url, 'month': month.isoformat()[:7],
                              'file': index, 'files': len(sources), 'bytes': 0, 'size': nemweb.file_size(url)}
+                    current.update(url=url, event=event)
                     report(event)
-                    path, digest = nemweb.download(url, cache, progress=lambda n: report({**event, 'bytes': n}),
-                                                   cancel=cancel)
+                    _, path, digest = next(downloads)
                     if name == 'DUDETAILSUMMARY':
                         references.append((path, digest, url))
                         continue
@@ -307,6 +313,7 @@ def load_mms(
                         raise
                 _diagnostics(c, names, lower, upper)
             finally:
+                downloads.close()
                 c.execute('RESET temp_directory')  # the scratch directory is about to be deleted
         try:
             c.execute('CHECKPOINT')

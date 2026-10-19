@@ -42,7 +42,7 @@ class Fixture(unittest.TestCase):
         self.database = self.root / 'nem.duckdb'
         self.cache = self.root / 'cache'
         self.network = MonthlyArchive()
-        for target in (patch('urllib.request.urlopen', side_effect=self.network.open),
+        for target in (patch("nemsplainer.nemweb._open", side_effect=self.network.open),
                        patch('nemsplainer.nemweb.REQUEST_INTERVAL', 0)):
             target.start()
             self.addCleanup(target.stop)

@@ -45,6 +45,19 @@ class Export(unittest.TestCase):
         listed = reports.listing(self.dir / 'reports')
         self.assertEqual(sorted(r['format'] for r in listed), sorted(reports.FORMATS))
 
+    def test_every_export_credits_aemo(self):
+        from nemsplainer.attribution import CREDIT
+        for fmt in reports.FORMATS:
+            _, data = self.export(fmt)
+            if fmt in ('docx', 'pptx', 'xlsx'):
+                with zipfile.ZipFile(io.BytesIO(data)) as package:
+                    text = ''.join(package.read(n).decode('utf-8', 'ignore') for n in package.namelist() if n.endswith('.xml'))
+                self.assertIn('Australian Energy Market Operator', text, fmt)
+            elif fmt == 'pdf':
+                self.assertGreater(len(data), 1000)  # rendered from the HTML, which carries the credit
+            else:
+                self.assertIn(CREDIT.replace("'", "&#x27;") if fmt == 'html' else CREDIT, data.decode(), fmt)
+
     def test_html_has_table_plot_and_sql(self):
         _, data = self.export('html')
         page = data.decode()

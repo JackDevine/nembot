@@ -170,6 +170,26 @@ holds the database open for writing, so stop it before using the CLI.
 - This build performs a single run and exits; there is no automatic polling.
   Data freshness is bounded by AEMO's monthly publication schedule.
 
+## Data source and terms
+
+> Contains data from the Australian Energy Market Operator (AEMO), published on
+> NEMWEB, used under AEMO's Copyright Permissions
+> (aemo.com.au/privacy-and-legal-notices/copyright-permissions). Processed by
+> nemsplainer; not endorsed by AEMO. AEMO gives no warranty of accuracy,
+> completeness or currency; use at your own risk.
+
+The same credit appears in the app (**Data: AEMO** in the header) and in
+every exported report and notebook.
+
+Downloads are polite but not slow:
+- 2 connections at most by default (`NEMSPLAINER_CONCURRENCY`, capped at 3),
+  reused rather than reopened for every file
+- requests paced by NEMWEB's response time (AutoThrottle-style), with
+  `NEMSPLAINER_REQUEST_INTERVAL` as an optional minimum gap
+- on errors it drops to one request at a time with backoff (honouring
+  `Retry-After`), and it stops after repeated HTTP 403s
+- listings are cached for an hour and files are never downloaded twice
+
 ## Acknowledgements
 
 - **marimo**: nemsplainer's data tables are ported from

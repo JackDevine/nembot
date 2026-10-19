@@ -340,3 +340,5 @@ details.test-failed > summary { color: #cf222e; }
 .mo-summary-chart { min-width: 80px; min-height: 40px; max-height: 44px; }
 .mo-summary-range { display: flex; justify-content: space-between; width: 100%; padding: 0 8px; white-space: pre; font-size: 11px; }
 .mo-summary-text { display: flex; flex-direction: column; white-space: pre; align-self: flex-start; }
+.link-like { border: none; background: none; padding: 0; font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; }
+.link-like:hover { color: var(--fg); text-decoration: underline; }

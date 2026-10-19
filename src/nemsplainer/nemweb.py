@@ -1,6 +1,7 @@
 """Monthly MMS archive discovery, validated caching, and streaming CSV envelopes."""
 
 from collections.abc import Callable, Sequence
+import concurrent.futures
 from contextlib import ExitStack
 import csv
 from datetime import date, datetime
@@ -22,23 +23,41 @@ import urllib.request
 import zipfile
 import zlib
 
+import urllib3
+
 from .tables import Table
 
 ROOT = 'https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/'
 
-# Courtesy towards AEMO: every request goes through _polite(), which allows one
-# request at a time process-wide, spaces requests out, identifies us honestly,
-# and backs off on throttling or server errors. Listings are cached briefly and
-# ZIPs indefinitely (see download), so reruns cost NEMWEB almost nothing.
-USER_AGENT = 'nemsplainer/0.1 (personal NEM analysis tool; sequential, cached downloads)'
-REQUEST_INTERVAL = float(os.environ.get('NEMSPLAINER_REQUEST_INTERVAL', '1.0'))  # seconds between requests
+# Courtesy towards AEMO, balanced against speed (see plan.md for the research):
+# - Connections are reused (a shared urllib3 pool), so small files don't pay a
+#   TLS handshake each. Other NEMWEB tools open a new connection per file.
+# - At most CONCURRENCY requests run at once: 2 by default, never more than 3
+#   (OpenElectricity, the largest production crawler, uses 3).
+# - Requests are paced adaptively, like Scrapy's AutoThrottle: the gap between
+#   request starts tracks server latency / concurrency, so it grows when NEMWEB
+#   slows down. Errors never shorten it.
+# - Any 429, 5xx or connection error drops to one request at a time with
+#   exponential backoff (honouring Retry-After); recovery is gradual.
+#   Repeated 403s stop the run instead of retrying around a block.
+# - Listings are cached for an hour and ZIPs forever, so reruns cost NEMWEB
+#   almost nothing.
+USER_AGENT = 'nemsplainer/0.1 (personal NEM analysis tool; <=3 connections, adaptive rate limit, cached downloads)'
+MAX_CONCURRENCY = 3
+CONCURRENCY = max(1, min(MAX_CONCURRENCY, int(os.environ.get('NEMSPLAINER_CONCURRENCY', '2'))))
+REQUEST_INTERVAL = float(os.environ.get('NEMSPLAINER_REQUEST_INTERVAL', '0'))  # optional minimum gap between requests
+MAX_DELAY = 30.0
+RECOVER_AFTER = 20      # successes before allowing one more concurrent request after an error
+FORBIDDEN_LIMIT = 3     # consecutive 403s before giving up
 LISTING_TTL = 3600
 MAX_ATTEMPTS = 4
 BACKOFF = 5.0  # seconds; doubles each retry unless the server sends Retry-After
 _RETRY_STATUS = {429, 500, 502, 503, 504}
-_lock = threading.RLock()
-_last_request = 0.0
 _listings: dict[str, tuple[float, list[str]]] = {}
+_pool = urllib3.PoolManager(
+    num_pools=4, maxsize=MAX_CONCURRENCY, block=True,
+    retries=urllib3.Retry(total=False, connect=0, read=0, status=0, other=0, redirect=3),
+)
 
 
 def clear_cache() -> None:
@@ -46,13 +65,101 @@ def clear_cache() -> None:
     _sizes.clear()
 
 
+class _Response:
+    """A pooled response with the parts of urlopen's interface we use."""
+
+    def __init__(self, response, url):
+        self._response, self.url = response, url
+        self.status, self.headers = response.status, response.headers
+
+    def read(self, amount=None):
+        try:
+            return self._response.read(amount)
+        except urllib3.exceptions.HTTPError as exc:
+            raise ConnectionError(f'{self.url}: {exc}') from exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # A fully read response returns its connection to the pool; a partial one is closed.
+        if self._response.length_remaining == 0 or self._response.isclosed():
+            self._response.release_conn()
+        else:
+            self._response.close()
+
+
+def _open(request: urllib.request.Request, timeout: float = 60) -> _Response:
+    """GET through the shared keep-alive pool. Raises urllib's HTTPError/URLError, like urlopen."""
+    url = request.full_url
+    try:
+        response = _pool.request('GET', url, headers=dict(request.header_items()), preload_content=False,
+                                 timeout=urllib3.Timeout(connect=20, read=timeout))
+    except urllib3.exceptions.HTTPError as exc:
+        raise urllib.error.URLError(f'{url}: {exc}') from exc
+    if response.status >= 400:
+        body = response.read()
+        response.release_conn()
+        raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, io.BytesIO(body))
+    return _Response(response, url)
+
+
+class _Throttle:
+    """Process-wide concurrency limit plus AutoThrottle-style pacing."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.active = 0
+        self.allowed = CONCURRENCY
+        self.delay = 0.0          # seconds between request starts
+        self.next_start = 0.0
+        self.successes = 0
+        self.forbidden = 0
+
+    def acquire(self):
+        while True:
+            with self.condition:
+                while self.active >= self.allowed:
+                    self.condition.wait()
+                now = time.monotonic()
+                wait = self.next_start - now
+                if wait <= 0:
+                    self.active += 1
+                    self.next_start = now + max(self.delay, REQUEST_INTERVAL)
+                    return
+            time.sleep(wait)
+
+    def release(self, latency: float, outcome: str):
+        """outcome: 'ok', 'neutral' (e.g. 404, cancelled), 'error' or 'forbidden'."""
+        with self.condition:
+            self.active -= 1
+            target = latency / max(1, self.allowed)
+            if outcome == 'ok':
+                self.forbidden = 0
+                self.delay = min(MAX_DELAY, (self.delay + target) / 2)
+                self.successes += 1
+                if self.allowed < CONCURRENCY and self.successes >= RECOVER_AFTER:
+                    self.allowed += 1
+                    self.successes = 0
+            elif outcome in ('error', 'forbidden'):
+                self.successes = 0
+                self.allowed = 1
+                self.delay = min(MAX_DELAY, max(self.delay, latency, 1.0))  # target for one request at a time
+                if outcome == 'forbidden':
+                    self.forbidden += 1
+            self.condition.notify_all()
+
+
+_throttle = _Throttle()
+
+
 def _retry_delay(exc: Exception, attempt: int) -> float | None:
     """Seconds to wait before retrying, or None if the error is not transient."""
     if isinstance(exc, urllib.error.HTTPError):
-        if exc.code not in _RETRY_STATUS:
+        if exc.code not in _RETRY_STATUS and exc.code != 403:
             return None
         retry_after = exc.headers.get('Retry-After') if exc.headers else None
-        if retry_after and retry_after.isdigit():
+        if retry_after and str(retry_after).isdigit():
             return min(float(retry_after), 300.0)
     elif not isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, HTTPException)):
         return None
@@ -61,24 +168,29 @@ def _retry_delay(exc: Exception, attempt: int) -> float | None:
 
 def _polite[T](url: str, consume: Callable[[object], T]) -> T:
     """Open ``url`` and hand the response to ``consume``, politely and with retries."""
-    global _last_request
-    with _lock:
-        for attempt in range(MAX_ATTEMPTS):
-            wait = _last_request + REQUEST_INTERVAL - time.monotonic()
-            if wait > 0:
-                time.sleep(wait)
-            try:
-                request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
-                with urllib.request.urlopen(request, timeout=60) as response:
-                    return consume(response)
-            except Exception as exc:
-                delay = _retry_delay(exc, attempt)
-                if delay is None or attempt == MAX_ATTEMPTS - 1:
-                    raise
-                time.sleep(delay)
-            finally:
-                _last_request = time.monotonic()
-        raise AssertionError('unreachable')
+    for attempt in range(MAX_ATTEMPTS):
+        _throttle.acquire()
+        started = time.monotonic()
+        latency, outcome, pause = None, 'ok', None
+        try:
+            request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+            with _open(request, timeout=60) as response:
+                latency = time.monotonic() - started  # time to headers, as AutoThrottle measures
+                return consume(response)
+        except Exception as exc:
+            delay = _retry_delay(exc, attempt)
+            forbidden = isinstance(exc, urllib.error.HTTPError) and exc.code == 403
+            outcome = 'forbidden' if forbidden else 'error' if delay is not None else 'neutral'
+            if forbidden and _throttle.forbidden + 1 >= FORBIDDEN_LIMIT:
+                raise RuntimeError(f'{url}: NEMWEB refused {FORBIDDEN_LIMIT} requests in a row (HTTP 403); '
+                                   'stopping rather than retrying around a block. Try again later.') from exc
+            if delay is None or attempt == MAX_ATTEMPTS - 1:
+                raise
+            pause = delay
+        finally:
+            _throttle.release(latency if latency is not None else time.monotonic() - started, outcome)
+        time.sleep(pause)
+    raise AssertionError('unreachable')
 
 
 class _Unavailable(RuntimeError):
@@ -221,7 +333,7 @@ def _validate_zip(path: Path) -> str:
 
 
 def download(url: str, cache_dir: Path, progress: Callable[[int], None] | None = None,
-             cancel: threading.Event | None = None) -> tuple[Path, str]:
+             cancel=None) -> tuple[Path, str]:
     """Stream to an incomplete path; publish only after ZIP CRC validation.
 
     ``progress`` receives the bytes written so far; setting ``cancel`` aborts
@@ -256,6 +368,49 @@ def download(url: str, cache_dir: Path, progress: Callable[[int], None] | None =
         raise RuntimeError(f'{url}: download/cache failure: {exc}') from exc
     finally:
         partial.unlink(missing_ok=True)
+
+
+class _Either:
+    """is_set() if either event is set (a caller's cancel, or download_many stopping)."""
+
+    def __init__(self, *events):
+        self.events = [e for e in events if e is not None]
+
+    def is_set(self):
+        return any(e.is_set() for e in self.events)
+
+
+def download_many(urls: Sequence[str], cache_dir: Path, progress: Callable[[str, int], None] | None = None,
+                  cancel: threading.Event | None = None):
+    """Yield (url, path, digest) in order, downloading a few files ahead in parallel.
+
+    The throttle still caps concurrent requests (CONCURRENCY); this just keeps
+    them busy while the caller loads earlier files. ``progress(url, bytes)`` is
+    called from worker threads. Closing the generator stops pending downloads.
+    """
+    stop = threading.Event()
+    either = _Either(cancel, stop)
+    pending = iter(urls)
+    window: list = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENCY, thread_name_prefix='nemweb') as pool:
+        def fill():
+            while len(window) < 2 * MAX_CONCURRENCY:
+                url = next(pending, None)
+                if url is None:
+                    return
+                callback = (lambda n, url=url: progress(url, n)) if progress else None
+                window.append((url, pool.submit(download, url, cache_dir, callback, either)))
+        try:
+            fill()
+            while window:
+                url, future = window.pop(0)
+                path, digest = future.result()
+                fill()
+                yield url, path, digest
+        finally:
+            stop.set()
+            for _, future in window:
+                future.cancel()
 
 
 def _value(value: str, kind: str) -> None:

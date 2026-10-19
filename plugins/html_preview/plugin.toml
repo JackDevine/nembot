@@ -1,0 +1,4 @@
+name = "html_preview"
+title = "HTML preview"
+description = "Renders an HTML document inline in the chat, in a sandboxed frame, so you can preview it without opening a new tab."
+version = "0.1.0"

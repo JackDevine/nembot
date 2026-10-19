@@ -21,6 +21,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "python-pptx>=1.0.2",
     "starlette>=1.6.0",
+    "urllib3>=2.8.0",
     "uvicorn>=0.53.0",
     "vl-convert-python>=1.9.0.post1",
     "weasyprint>=70.0",

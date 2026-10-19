@@ -1,5 +1,23 @@
 // Shared DOM and rendering helpers (classic script: globals shared with chat.js/explorer.js).
 
+// "Data: AEMO" in the header: the attribution AEMO's terms ask for.
+async function showAbout() {
+  const info = await getJSON('/api/about');
+  const backdrop = el('div', 'modal-backdrop');
+  const box = el('div', 'modal');
+  const link = el('a', '', 'AEMO Copyright Permissions'); link.href = info.copyright_url; link.target = '_blank'; link.rel = 'noopener';
+  const close = el('button', 'primary', 'Close');
+  close.onclick = () => backdrop.remove();
+  backdrop.onclick = e => { if (e.target === backdrop) backdrop.remove(); };
+  const buttons = el('div', 'buttons'); buttons.append(close);
+  const terms = el('p', 'muted'); terms.append('See ', link, '.');
+  box.append(el('h3', '', 'Data source'), el('p', '', info.credit), terms,
+    el('p', 'muted', `Table documentation: ${info.data_model.title} v${info.data_model.version} (${info.data_model.date}), AEMO.`), buttons);
+  backdrop.append(box);
+  document.body.append(backdrop);
+}
+document.getElementById('about-button')?.addEventListener('click', showAbout);
+
 async function getJSON(url) {
   const response = await fetch(url);
   const body = await response.json();

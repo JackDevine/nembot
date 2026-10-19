@@ -243,6 +243,11 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': str(exc)}, status_code=400)
         return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
 
+    async def about(request: Request):
+        from .attribution import COPYRIGHT_URL, CREDIT
+        return JSONResponse({'credit': CREDIT, 'copyright_url': COPYRIGHT_URL,
+                             'data_model': explorer.catalog.source()})
+
     async def plugin_list(request: Request):
         return JSONResponse({'plugins': [p.public() for p in plugin_manager.plugins.values()],
                              'directory': str(plugin_manager.directory)})
@@ -383,6 +388,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
         Route('/api/query', query, methods=['POST']),
+        Route('/api/about', about),
         Route('/api/plugins', plugin_list),
         Route('/api/plugins/reload', plugin_reload, methods=['POST']),
         Route('/api/plugins/{name}/enable', plugin_enable, methods=['POST']),

@@ -11,11 +11,19 @@ dependencies = [
     "altair>=6.3.0",
     "anthropic>=1.15.0",
     "duckdb>=1.4,<2",
+    "ipykernel>=7.4.0",
+    "jupyterlab>=4.6.4",
     "marimo>=0.24.2",
+    "nbformat>=5.11.1",
     "openai>=3.35.1",
+    "openpyxl>=3.1.5",
+    "polars>=2.0.0",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
     "starlette>=1.6.0",
     "uvicorn>=0.53.0",
     "vl-convert-python>=1.9.0.post1",
+    "weasyprint>=70.0",
 ]
 
 [project.scripts]

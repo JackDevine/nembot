@@ -1,6 +1,7 @@
 """Localhost web chat over the MMS database, backed by Claude or OpenRouter models."""
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -10,12 +11,13 @@ import duckdb
 import openai
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import downloads, explorer, snippets
+from . import client, downloads, explorer, reports, snippets
+from .notebooks import NotebookServers
 from .ingest import SUPPORTED
 from .chat import Conversation, run_turn
 from .claude import ClaudeProvider
@@ -40,12 +42,18 @@ def _api_error(exc: Exception) -> str:
     return f'{type(exc).__name__}: {exc}'
 
 
-def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
+def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://127.0.0.1:8000') -> Starlette:
     # One read-write connection for the whole app: downloads write through a
     # cursor while chat/explorer reads use their own cursors (DuckDB MVCC).
     db = duckdb.connect(database)
     jobs = downloads.Downloads(db, Path(database).absolute(), Path(cache_dir).absolute())
     snippets.ensure(db)
+    report_dir = Path(database).absolute().parent / 'reports'
+    notebook_servers = NotebookServers(report_dir, url)
+
+    async def exporter(fmt, title, content, results):
+        return await asyncio.to_thread(reports.export, db, report_dir, fmt, title, content, results,
+                                       url=url, database=str(Path(database).absolute()))
     claude = anthropic.AsyncAnthropic()
     catalog = Catalog(claude)
     providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider()}
@@ -79,7 +87,8 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
                 yield f"data: {json.dumps({'type': 'model', 'model': public(model)})}\n\n"
                 try:
                     async for event in run_turn(providers, db, conversation, text, model,
-                                                web_search=bool(body.get('web_search')), jobs=jobs):
+                                                web_search=bool(body.get('web_search')), jobs=jobs,
+                                                exporter=exporter):
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
                     logging.getLogger(__name__).exception('chat turn failed')
@@ -138,6 +147,50 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
         if not snippet:
             return JSONResponse({'error': 'unknown snippet'}, status_code=404)
         return JSONResponse({'snippet': snippet, **await asyncio.to_thread(snippets.run, db, snippet)})
+
+    async def query(request: Request):
+        """SELECT-only query endpoint for generated notebooks (Parquet response)."""
+        if request.headers.get('content-type', '').split(';')[0] != 'application/json':
+            return JSONResponse({'error': 'expected application/json'}, status_code=415)
+        body = await request.json()
+
+        def run():
+            cursor = db.cursor()
+            try:
+                return client.parquet_bytes(cursor, str(body.get('sql', '')))
+            finally:
+                cursor.close()
+        try:
+            data = await asyncio.to_thread(run)
+        except (ValueError, duckdb.Error) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+        return Response(data, media_type='application/vnd.apache.parquet')
+
+    def report_path(name: str) -> Path | None:
+        path = (report_dir / name).resolve()
+        return path if path.parent == report_dir.resolve() and path.is_file() else None
+
+    async def report_list(request: Request):
+        return JSONResponse({'reports': await asyncio.to_thread(reports.listing, report_dir)})
+
+    async def report_file(request: Request):
+        path = report_path(request.path_params['name'])
+        if path is None:
+            return JSONResponse({'error': 'no such report'}, status_code=404)
+        inline = path.suffix in ('.html', '.pdf')
+        return FileResponse(path, filename=None if inline else path.name,
+                            content_disposition_type='inline' if inline else 'attachment')
+
+    async def notebook_open(request: Request):
+        path = report_path(request.path_params['name'])
+        if path is None or path.suffix not in ('.ipynb', '.py'):
+            return JSONResponse({'error': 'no such notebook'}, status_code=404)
+        kind = 'jupyter' if path.suffix == '.ipynb' else 'marimo'
+        try:
+            target = await asyncio.to_thread(notebook_servers.url, kind, path.name)
+        except RuntimeError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=500)
+        return RedirectResponse(target)
 
     async def explorer_overview(request: Request):
         return JSONResponse(await asyncio.to_thread(explorer.overview, db))
@@ -205,11 +258,20 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
         job = jobs.cancel(job_id)
         return JSONResponse(job.public()) if job else JSONResponse({'error': 'unknown job'}, status_code=404)
 
-    return Starlette(routes=[
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        yield
+        notebook_servers.stop()  # also registered with atexit
+
+    return Starlette(lifespan=lifespan, routes=[
         Route('/', index),
         Route('/api/models', models),
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
+        Route('/api/query', query, methods=['POST']),
+        Route('/api/reports', report_list),
+        Route('/reports/{name}', report_file),
+        Route('/notebooks/open/{name}', notebook_open),
         Route('/api/snippets', snippet_list, methods=['GET', 'POST']),
         Route('/api/snippets/{id:int}', snippet_item, methods=['GET', 'PATCH', 'DELETE']),
         Route('/api/snippets/{id:int}/run', snippet_run),
@@ -236,7 +298,7 @@ def main() -> None:
     for noisy in ('httpx', 'httpx2', 'anthropic', 'openai'):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
-        app = create_app(args.database, args.cache_dir)
+        app = create_app(args.database, args.cache_dir, f'http://{args.host}:{args.port}')
     except duckdb.IOException as exc:
         parser.error(f'cannot open {args.database} for writing ({exc}). Is another nemsplainer process using it?')
     uvicorn.run(app, host=args.host, port=args.port)

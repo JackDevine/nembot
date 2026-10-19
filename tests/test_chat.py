@@ -120,7 +120,7 @@ class FakeProvider:
                'raw': {}, 'tool_calls': [], 'stop': 'end'}
 
 
-class TurnLoop(unittest.TestCase):
+class DatabaseCase(unittest.TestCase):
     def setUp(self):
         latest = patch('nemsplainer.chat.downloads.latest_published', return_value='2026-09')
         latest.start()
@@ -139,6 +139,8 @@ class TurnLoop(unittest.TestCase):
             return [e async for e in run_turn({'openrouter': provider}, self.db, conversation, text, GLM)]
         return asyncio.run(collect())
 
+
+class TurnLoop(DatabaseCase):
     def test_tool_round_trip_records_history_and_final_table(self):
         conversation = Conversation()
         events = self.run_turn(FakeProvider(), conversation)
@@ -146,7 +148,9 @@ class TurnLoop(unittest.TestCase):
         self.assertEqual(events[-1]['rows'], [[42]])
         roles = [e['role'] for e in conversation.history]
         self.assertEqual(roles, ['user', 'assistant', 'tool', 'assistant'])
-        self.assertEqual(conversation.history[2]['results'][0]['text'], 'answer\n42\n')
+        self.assertEqual(conversation.history[2]['results'][0]['text'], 'Result id: R1\nanswer\n42\n')
+        self.assertEqual(conversation.results, {'R1': {'sql': 'SELECT 42 AS answer', 'plot_spec': None}})
+        self.assertEqual(events[-1]['result_id'], 'R1')
 
     def test_failed_turn_is_rolled_back(self):
         conversation = Conversation()
@@ -193,7 +197,7 @@ class DownloadRequester:
                'tool_calls': [], 'stop': 'end'}
 
 
-class DownloadRequests(TurnLoop):
+class DownloadRequests(DatabaseCase):
     def converse(self, jobs, decision):
         conversation = Conversation()
 

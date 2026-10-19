@@ -71,6 +71,15 @@ a name suggested by the current model that you can edit. The **Snippets** tab
 lists them, and each one re-runs its SQL when you open it, so it always shows
 the latest data.
 
+## Reports and notebooks
+
+Ask the chat for a report ("make this a PowerPoint deck", "export a PDF",
+"give me a Jupyter notebook") and it builds one from the conversation's tables
+and plots, re-running their SQL: HTML, PDF, Word, PowerPoint, Excel, Jupyter or
+marimo. Files are saved in `data/reports/` and listed on the **Reports** tab.
+Notebooks open in JupyterLab or marimo, which the app starts locally on
+demand; they query the database through the running app.
+
 ## Explorer
 
 The **Explorer** tab lists every table published in the MMSDM monthly archive,

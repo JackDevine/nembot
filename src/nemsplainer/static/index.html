@@ -20,6 +20,7 @@
       <a href="#chat" data-view="chat">Chat</a>
       <a href="#explorer" data-view="explorer">Explorer</a>
       <a href="#snippets" data-view="snippets">Snippets</a>
+      <a href="#reports" data-view="reports">Reports</a>
     </nav>
   </div>
   <div class="header-right">
@@ -72,21 +73,27 @@
   <main id="snippet-view"><p class="empty">Choose a snippet on the left.</p></main>
 </section>
 
+<section id="reports-view" class="view">
+  <main id="report-view"></main>
+</section>
+
 <script src="/static/common.js"></script>
 <script src="/static/downloads.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/explorer.js"></script>
 <script src="/static/snippets.js"></script>
+<script src="/static/reports.js"></script>
 <script>
 // Hash routing: #chat, #explorer, #explorer/<TABLE>.
 function route() {
   const [view, ...rest] = (location.hash.slice(1) || 'chat').split('/');
-  const name = ['chat', 'explorer', 'snippets'].includes(view) ? view : 'chat';
+  const name = ['chat', 'explorer', 'snippets', 'reports'].includes(view) ? view : 'chat';
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `${name}-view`));
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === name));
   document.getElementById('reset').style.visibility = name === 'chat' ? 'visible' : 'hidden';
   if (name === 'explorer') showExplorer(rest.join('/') || null);
   if (name === 'snippets') showSnippets(rest.join('/') || null);
+  if (name === 'reports') showReports();
 }
 window.addEventListener('hashchange', route);
 route();

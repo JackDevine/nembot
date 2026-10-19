@@ -42,6 +42,13 @@ Your tools work on a local DuckDB copy of AEMO's public MMS data (the `nem` data
 - `request_download(table, start_month, end_month, reason)` asks the user to approve
   downloading months of a table from AEMO. The user sees a popup and may change the
   months. It returns once the download has finished, failed or been declined.
+- `create_report(format, title, content)` exports a report (html, pdf, docx, pptx, xlsx) or a
+  runnable notebook (jupyter, marimo) built from this conversation's results. Only use it
+  when the user asks for a report, document, deck, workbook or notebook.
+  Every query/plot result has an id (shown as "Result id: R3" in tool output). Write the
+  content in markdown and put a result on its own line as [[R3]] to include it. Use ##
+  headings for sections (each section becomes a slide in pptx). Include only results that
+  support the narrative; the data is re-queried when the file is built.
 """
 
 _VISION_TOOLS = """- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
@@ -163,6 +170,21 @@ TOOLS = [
             'type': 'object',
             'properties': {'table': {'type': 'string', 'description': 'MMS table name, e.g. DISPATCHLOAD.'}},
             'required': ['table'],
+        },
+    },
+    {
+        'name': 'create_report',
+        'description': ('Export a report or notebook from this conversation. content is markdown; put a result on '
+                        'its own line as [[R3]] to include that table or plot. ## headings start sections '
+                        '(slides in pptx). xlsx gets one sheet per included result.'),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'format': {'type': 'string', 'enum': ['html', 'pdf', 'docx', 'pptx', 'xlsx', 'jupyter', 'marimo']},
+                'title': {'type': 'string'},
+                'content': {'type': 'string', 'description': 'Markdown with [[R<n>]] result markers on their own lines.'},
+            },
+            'required': ['format', 'title', 'content'],
         },
     },
     {
@@ -441,6 +463,7 @@ class Conversation:
     history: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending: dict = field(default_factory=dict)  # download request id -> Future for the user's decision
+    results: dict = field(default_factory=dict)  # 'R1' -> {'sql', 'plot_spec'} for reports
 
 
 DECISION_TIMEOUT = 1800  # seconds to wait for the user to approve or decline a download
@@ -511,7 +534,7 @@ async def request_download(db, jobs, conversation: Conversation, call: dict) -> 
 
 
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
-                   web_search: bool = False, jobs=None) -> AsyncIterator[dict]:
+                   web_search: bool = False, jobs=None, exporter=None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -548,7 +571,30 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                         else:
                             yield event
                     continue
+                if call['name'] == 'create_report' and valid_input(call['name'], call['input']):
+                    result = {'id': call['id'], 'name': call['name'], 'image': None, 'is_error': False}
+                    try:
+                        if exporter is None:
+                            raise RuntimeError('Reports are not available in this app.')
+                        report = await exporter(call['input']['format'], call['input']['title'],
+                                                call['input']['content'], conversation.results)
+                        notes = ''.join([f" Unknown result ids: {', '.join(report['missing'])}." if report['missing'] else '',
+                                         f" Results that failed: {report['errors']}." if report['errors'] else ''])
+                        result['text'] = f"Created {report['file']}. The user can open it from the link in the chat.{notes}"
+                        yield {'type': 'report', **report}
+                    except Exception as exc:
+                        result.update(text=f'Report failed: {exc}', is_error=True)
+                    results.append(result)
+                    continue
                 result, events = await execute_tool(db, call)
+                if not result['is_error'] and any(e['type'] == 'table' for e in events):
+                    # Number the result so the model can place it in a report.
+                    rid = f'R{len(conversation.results) + 1}'
+                    plot = next((e for e in events if e['type'] == 'plot'), None)
+                    conversation.results[rid] = {'sql': call['input']['sql'], 'plot_spec': plot and plot['plot_spec']}
+                    result['text'] = f'Result id: {rid}\n{result["text"]}'
+                    for event in events:
+                        event['result_id'] = rid
                 for event in events:
                     if event['type'] == 'table':
                         latest_table = event

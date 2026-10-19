@@ -182,6 +182,7 @@ async function ask(text) {
         segment = null;
         status.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
+          create_report: 'Building the report (re-running its queries)…',
           web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
         break;
       case 'plot': segment = null; place(renderPlot(event, snippetButton({ sql: event.sql, plot_spec: event.plot_spec, question: text }))); break;
@@ -199,6 +200,14 @@ async function ask(text) {
       }
       case 'table': segment = null; place(renderTable(event, snippetButton({ sql: event.sql, plot_spec: null, question: text }))); break;
       case 'notice': status.textContent = event.message; break;
+      case 'report': {
+        segment = null;
+        const card = el('div', 'report-card');
+        card.append(el('span', 'report-icon', '📄'), el('b', '', event.title),
+          el('span', 'muted', ` ${FORMAT_LABELS[event.format] || event.format} · ${formatBytes(event.bytes)}`), reportLinks(event));
+        place(card);
+        break;
+      }
       case 'download_request':
         segment = null;
         place(downloadRequestCard(event));

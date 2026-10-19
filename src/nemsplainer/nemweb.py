@@ -9,6 +9,7 @@ import hashlib
 from html.parser import HTMLParser
 from http.client import HTTPException
 import io
+import math
 import os
 from pathlib import Path
 import re
@@ -227,6 +228,10 @@ def _value(value: str, kind: str) -> None:
     """Reject incompatible supplied values even outside the requested date range."""
     if not value or kind == 'VARCHAR':
         return
+    if kind == 'DOUBLE':
+        if not math.isfinite(float(value)):
+            raise ValueError('non-finite number')
+        return
     if kind == 'TIMESTAMP':
         if not re.fullmatch(r'[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}', value):
             raise ValueError('expected YYYY/MM/DD HH:MM:SS')
@@ -249,6 +254,9 @@ def normalize(archive: Path, table: Table, directory: Path, url: str) -> list[tu
     """Validate complete C/I/D members, returning one CSV per selected I segment."""
     outputs = []
     context = f'{url} / {table.name}'
+    # Tables without a known CSV identity take it from the archive's first I
+    # record; archives for these tables are expected to hold one table only.
+    identity = [table.dataset, table.csv_table] if table.dataset else None
     try:
         with zipfile.ZipFile(archive) as source, ExitStack() as handles:
             for member in source.infolist():
@@ -276,8 +284,15 @@ def normalize(archive: Path, table: Table, directory: Path, url: str) -> list[tu
                                     raise RuntimeError(f'{context}: invalid END OF REPORT count')
                                 ended = True
                             continue
-                        selected = row[1:3] == [table.dataset, table.csv_table]
-                        if not selected:
+                        if identity is None:
+                            if row[0] != 'I':
+                                raise RuntimeError(f'{context}: data before the first I header')
+                            identity = row[1:3]
+                        if row[1:3] != identity:
+                            if not table.dataset:
+                                raise RuntimeError(f'{context}: archive holds more than one MMS table '
+                                                   f'({"/".join(identity)} and {"/".join(row[1:3])}), so the '
+                                                   f'{table.name} records cannot be identified')
                             continue
                         version = row[3] if len(row) > 3 else '<missing>'
                         context += f' / version {version}'

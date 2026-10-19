@@ -25,3 +25,8 @@ nemsplainer-chat = "nemsplainer.web:main"
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pdfplumber>=0.11.10",
+]

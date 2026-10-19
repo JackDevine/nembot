@@ -9,7 +9,10 @@ import tempfile
 import duckdb
 
 from . import nemweb
-from .tables import TABLES, Table
+from .tables import DEFAULT_TABLES, TABLES, Table
+
+# Tables the loader's window filtering and diagnostics handle today.
+SUPPORTED = DEFAULT_TABLES
 
 MARKET_TIME = timezone(timedelta(hours=10))
 
@@ -36,8 +39,8 @@ def validate_inputs(tables, start_date=None, end_date=None, *, database="data/ne
         raise ValueError("tables must be a nonempty sequence of table names")
     names = []
     for name in tables:
-        if not isinstance(name, str) or name.upper() not in TABLES:
-            raise ValueError(f"Unsupported MMS table: {name!r}; choose {', '.join(TABLES)}")
+        if not isinstance(name, str) or name.upper() not in SUPPORTED:
+            raise ValueError(f"Unsupported MMS table: {name!r}; choose {', '.join(SUPPORTED)}")
         if name.upper() not in names:
             names.append(name.upper())
     start, end = _date(start_date, "start"), _date(end_date, "end")

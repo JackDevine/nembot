@@ -7,7 +7,7 @@ import tomllib
 import duckdb
 
 from .ingest import load_mms, validate_inputs
-from .tables import TABLES
+from .tables import DEFAULT_TABLES
 
 
 def main() -> None:
@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument('--config', type=Path, metavar='PATH')
     args = vars(parser.parse_args())
     config_path = args.pop('config')
-    options = dict(tables=list(TABLES), start=None, end=None, database='data/nem.duckdb', cache_dir='data/cache')
+    options = dict(tables=list(DEFAULT_TABLES), start=None, end=None, database='data/nem.duckdb', cache_dir='data/cache')
     try:
         if config_path is not None:
             with config_path.open('rb') as source:

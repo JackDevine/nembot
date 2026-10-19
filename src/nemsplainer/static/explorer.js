@@ -277,6 +277,7 @@ async function drawActions(d, slot) {
     const b = el('button', 'primary', 'Download…');
     b.onclick = () => downloadDialog(plan);
     buttons.push(b);
+    if (plan.live && plan.live.available && !plan.live.up_to_date) buttons.push(liveButton(d, plan.live));
   } else {
     if (plan.refresh) {
       const b = el('button', 'primary', `Refresh (${plan.refresh.start === plan.refresh.end ? plan.refresh.end : `${plan.refresh.start} to ${plan.refresh.end}`})`);
@@ -293,12 +294,34 @@ async function drawActions(d, slot) {
       b.title = `You have the latest published month (${plan.latest_month}).`;
       buttons.push(b);
     }
+    if (plan.live && plan.live.available && !plan.live.up_to_date) buttons.push(liveButton(d, plan.live));
     const more = el('button', '', 'Download more…');
     more.onclick = () => downloadDialog(plan, { start: shiftMonth(plan.latest_month, -2), title: `Download more ${d.name}` });
     buttons.push(more);
   }
   buttons.forEach(b => { if (busy) b.disabled = true; });
   slot.replaceChildren(...buttons);
+}
+
+// Recent data from NEMWEB's daily and 5-minute reports, after the monthly archive.
+function liveButton(d, live) {
+  const b = el('button', '', `Get latest (to ${live.through.slice(0, 16)})`);
+  const files = live.archive_files + live.current_files;
+  b.title = `Fetch ${files} recent report file${files === 1 ? '' : 's'} from AEMO's ${live.family} (about ${formatBytes(live.size)}), `
+    + `covering ${live.since.slice(0, 16)} to ${live.through.slice(0, 16)}. These are newer than the monthly archive.`
+    + (live.skipped_current ? ` The newest ${live.skipped_current} five-minute files are skipped (too many requests to be polite), so data stops at the latest daily/weekly archive.` : '')
+    + ' The monthly archive will later supersede this data.';
+  b.onclick = async () => {
+    b.disabled = true;
+    try {
+      const response = await fetch('/api/downloads', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table: d.name, live: true }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error);
+      refreshJobs();
+    } catch (err) { alert(err.message); b.disabled = false; }
+  };
+  return b;
 }
 
 function drawJobSlot() {

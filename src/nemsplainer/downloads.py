@@ -17,7 +17,7 @@ import time
 
 import duckdb
 
-from . import catalog, nemweb
+from . import catalog, live, nemweb
 from .ingest import EXACT_WINDOW, MARKET_TIME, _month_shift, load_mms
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,8 @@ class Job:
     start: date
     end: date
     reason: str = 'explorer'
+    kind: str = 'archive'   # 'archive' (monthly MMSDM) or 'live' (recent report files)
+    files: list = field(default_factory=list)  # live jobs: the planned report files
     id: int = field(default_factory=lambda: next(_ids))
     status: str = 'queued'  # queued, running, done, failed, cancelled
     progress: dict = field(default_factory=dict)
@@ -41,7 +43,7 @@ class Job:
 
     def public(self) -> dict:
         return {'id': self.id, 'table': self.table, 'start': self.start.isoformat(), 'end': self.end.isoformat(),
-                'reason': self.reason, 'status': self.status, 'progress': self.progress, 'error': self.error,
+                'reason': self.reason, 'kind': self.kind, 'status': self.status, 'progress': self.progress, 'error': self.error,
                 'created': self.created, 'finished': self.finished}
 
 
@@ -67,8 +69,9 @@ class Downloads:
         self.lock = threading.Lock()
         threading.Thread(target=self._worker, name='downloads', daemon=True).start()
 
-    def submit(self, table: str, start: date, end: date, reason: str = 'explorer') -> Job:
-        job = Job(table, start, end, reason)
+    def submit(self, table: str, start: date, end: date, reason: str = 'explorer', *,
+               kind: str = 'archive', files: list | None = None) -> Job:
+        job = Job(table, start, end, reason, kind, files or [])
         with self.lock:
             self.jobs[job.id] = job
         self.queue.put(job)
@@ -106,8 +109,11 @@ class Downloads:
                 job.progress = event
 
             try:
-                load_mms([job.table], job.start, job.end, database=self.database, cache_dir=self.cache_dir,
-                         connection=self.db, progress=progress, cancel=job.cancel)
+                if job.kind == 'live':
+                    live.load(self.db, job.table, job.files, self.cache_dir, progress=progress, cancel=job.cancel)
+                else:
+                    load_mms([job.table], job.start, job.end, database=self.database, cache_dir=self.cache_dir,
+                             connection=self.db, progress=progress, cancel=job.cancel)
                 job.status = 'done'
             except nemweb.Cancelled:
                 job.status = 'cancelled'
@@ -166,4 +172,27 @@ def plan(db: duckdb.DuckDBPyConnection, table: str) -> dict:
         'loaded_months': loaded, 'latest_month': latest, 'first_month': f'{FIRST_MONTH:%Y-%m}',
         'refresh': refresh, 'up_to_date': bool(loaded) and refresh is None,
         'month_size': month_size(table, latest),
+        'live': live_plan(db, table, latest),
     }
+
+
+def live_plan(db, table: str, latest: str) -> dict:
+    """Recent report files after the monthly archive, without the (long) file list."""
+    if table not in live.FEEDS:
+        return {'available': False}
+    try:
+        result = live.plan(db, table, latest)
+    except RuntimeError as exc:
+        return {'available': False, 'error': str(exc)}
+    result.pop('files')
+    return result
+
+
+def submit_live(jobs: 'Downloads', db, table: str, reason: str = 'explorer') -> Job | None:
+    """Queue a job for every report file newer than what's loaded; None if up to date."""
+    result = live.plan(db, table, latest_published(table))
+    if not result['files']:
+        return None
+    start = datetime.fromisoformat(result['files'][0]['start']).date()
+    end = datetime.fromisoformat(result['files'][-1]['end']).date()
+    return jobs.submit(table, start, end, reason, kind='live', files=result['files'])

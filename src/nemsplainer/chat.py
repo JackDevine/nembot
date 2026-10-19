@@ -14,7 +14,7 @@ import base64
 import concurrent.futures
 import csv
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import io
 import json
@@ -24,8 +24,8 @@ import altair
 import duckdb
 import vl_convert
 
-from . import catalog, downloads, explorer
-from .ingest import SUPPORTED
+from . import catalog, downloads, explorer, live
+from .ingest import SUPPORTED, _month_shift
 from .models import ModelInfo
 
 TABLE_ROWS = 200
@@ -39,7 +39,7 @@ Your tools work on a local DuckDB copy of AEMO's public MMS data (the `nem` data
 - `query_mms(sql)` returns a short CSV preview and displays a table to the user.
 - `describe_table(table)` returns AEMO's data-model documentation for any MMS table
   (description, keys, columns and their meaning) and which months are downloaded.
-- `request_download(table, start_month, end_month, reason)` asks the user to approve
+- `request_download(table, start_month, end_month, reason, recent)` asks the user to approve
   downloading months of a table from AEMO. The user sees a popup and may change the
   months. It returns once the download has finished, failed or been declined.
 - `create_report(format, title, content)` exports a report (html, pdf, docx, pptx, xlsx) or a
@@ -199,6 +199,10 @@ TOOLS = [
                 'start_month': {'type': 'string', 'description': 'First month, YYYY-MM.'},
                 'end_month': {'type': 'string', 'description': 'Last month, YYYY-MM (inclusive).'},
                 'reason': {'type': 'string', 'description': 'One sentence for the user: why this data is needed.'},
+                'recent': {'type': 'boolean', 'description': (
+                    'Also fetch AEMO\'s recent daily/5-minute reports published after the latest monthly '
+                    'archive (only for: ' + ', '.join(sorted(live.FEEDS)) + '). Use when the question needs '
+                    'data newer than the latest monthly archive month.')},
             },
             'required': ['table', 'start_month', 'end_month', 'reason'],
         },
@@ -496,6 +500,7 @@ async def request_download(db, jobs, conversation: Conversation, call: dict) -> 
     conversation.pending[request_id] = future
     yield {'type': 'download_request', 'id': request_id, 'table': table, 'start': args['start_month'],
            'end': args['end_month'], 'reason': args.get('reason', ''), 'comment': catalog.tables()[table]['comment'],
+           'recent': bool(args.get('recent')) and table in live.FEEDS,
            'plan': plan}
     try:
         decision = await asyncio.wait_for(future, DECISION_TIMEOUT)
@@ -515,13 +520,27 @@ async def request_download(db, jobs, conversation: Conversation, call: dict) -> 
     except ValueError as exc:
         yield result(f'The months chosen were invalid: {exc}', True)
         return
-    job = jobs.submit(table, start, end, reason='chat')
-    yield {'type': 'download_started', 'id': request_id, 'job': job.public()}
-    while job.status in ('queued', 'running'):
-        await asyncio.sleep(1)
-        yield {'type': 'download_progress', 'id': request_id, 'job': job.public()}
-    yield {'type': 'download_finished', 'id': request_id, 'job': job.public()}
-    months = f'{start:%Y-%m} to {end:%Y-%m}'
+    recent = bool(args.get('recent')) and table in live.FEEDS and decision.get('recent', True)
+    latest = date.fromisoformat(plan['latest_month'] + '-01')
+    end = min(end, _month_shift(latest, 1) - timedelta(days=1))  # monthly archive only goes this far
+    jobs_run = []
+    if start <= end:
+        jobs_run.append(jobs.submit(table, start, end, reason='chat'))
+    if recent:
+        jobs_run.append(await asyncio.to_thread(downloads.submit_live, jobs, db, table, 'chat'))
+    jobs_run = [j for j in jobs_run if j is not None]
+    if not jobs_run:
+        yield result(f'{table} already has everything requested. Re-run your query.')
+        return
+    for job in jobs_run:
+        yield {'type': 'download_started', 'id': request_id, 'job': job.public()}
+        while job.status in ('queued', 'running'):
+            await asyncio.sleep(1)
+            yield {'type': 'download_progress', 'id': request_id, 'job': job.public()}
+        yield {'type': 'download_finished', 'id': request_id, 'job': job.public()}
+        if job.status != 'done':
+            break
+    months = f'{start:%Y-%m} to {end:%Y-%m}' + (' plus recent reports' if recent else '')
     if job.status == 'done':
         status = await asyncio.to_thread(describe_table, db, table)
         yield result(f'Downloaded {table} for {months}. Re-run your query now.\n'

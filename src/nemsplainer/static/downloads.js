@@ -22,6 +22,10 @@ function shiftMonth(month, offset) {
   return d.toISOString().slice(0, 7);
 }
 
+function jobRange(job) {
+  return job.kind === 'live' ? `${job.start} to ${job.end} (recent reports)` : `${job.start.slice(0, 7)} to ${job.end.slice(0, 7)}`;
+}
+
 function activeJob() { return downloads.jobs.find(j => j.status === 'running') || downloads.jobs.find(j => j.status === 'queued'); }
 
 function jobPercent(job) {
@@ -37,7 +41,8 @@ function jobSummary(job) {
   if (job.status === 'queued') return 'Waiting for the current download to finish…';
   if (p.stage === 'listing' || !p.stage) return 'Checking which archive files are needed…';
   if (p.stage === 'resolved') return `${p.files} file${p.files === 1 ? '' : 's'} to fetch (${formatBytes(p.size)})…`;
-  if (p.stage === 'download') return `Downloading ${p.month} (file ${p.file} of ${p.files}): ${formatBytes(p.bytes)} of ${formatBytes(p.size)}`;
+  if (p.stage === 'download') return `Downloading ${p.month} (file ${p.file} of ${p.files}): ${formatBytes(p.bytes)} of ${formatBytes(p.size)}`
+    + (job.kind === 'live' && p.files > 50 ? '. Small report files are fetched one per second, to be polite to AEMO.' : '');
   if (p.stage === 'load') return `Loading ${p.month || ''} into the database (file ${p.file || '?'} of ${p.files || '?'})…`;
   return 'Finishing…';
 }
@@ -103,7 +108,7 @@ function jobPanel(table) {
   if (!job || job.status === 'done') return null;
   const panel = el('div', `job-panel ${job.status}`);
   if (job.status === 'failed') {
-    panel.append(el('b', '', `Download of ${job.table} (${job.start.slice(0, 7)} to ${job.end.slice(0, 7)}) failed`),
+    panel.append(el('b', '', `Download of ${job.table} (${jobRange(job)}) failed`),
       el('pre', 'job-error', job.error), el('p', '', 'Files that finished before the error were kept; nothing from the failed file was loaded.'));
     const dismiss = el('button', '', 'Dismiss');
     dismiss.onclick = () => dismissDownload(job.id);
@@ -119,7 +124,7 @@ function jobPanel(table) {
     if (pct !== null) bar.value = pct;
     const cancel = el('button', '', 'Cancel');
     cancel.onclick = () => { cancel.disabled = true; cancelDownload(job.id); };
-    panel.append(el('div', '', `${job.table}: ${job.start.slice(0, 7)} to ${job.end.slice(0, 7)}`), bar, el('div', 'muted', jobSummary(job)), cancel);
+    panel.append(el('div', '', `${job.table}: ${jobRange(job)}`), bar, el('div', 'muted', jobSummary(job)), cancel);
   }
   return panel;
 }

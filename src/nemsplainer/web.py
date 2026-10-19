@@ -16,7 +16,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import client, downloads, explorer, reports, snippets
+from . import client, downloads, explorer, live, reports, snippets
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
 from .chat import Conversation, run_turn
@@ -105,7 +105,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         future = conversation and conversation.pending.get(str(body.get('request', '')))
         if not future or future.done():
             return JSONResponse({'error': 'no pending download request'}, status_code=404)
-        future.set_result({'approve': bool(body.get('approve')), 'start': body.get('start'), 'end': body.get('end')})
+        future.set_result({'approve': bool(body.get('approve')), 'start': body.get('start'), 'end': body.get('end'),
+                           'recent': bool(body.get('recent', True))})
         return JSONResponse({'ok': True})
 
     async def snippet_list(request: Request):
@@ -241,6 +242,16 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'jobs': jobs.list()})
         body = await request.json()
         name = str(body.get('table', '')).upper()
+        if body.get('live'):
+            if name not in live.FEEDS:
+                return JSONResponse({'error': f'Recent data is not supported for {name} yet'}, status_code=400)
+            try:
+                job = await asyncio.to_thread(downloads.submit_live, jobs, db, name, str(body.get('reason') or 'explorer'))
+            except RuntimeError as exc:
+                return JSONResponse({'error': str(exc)}, status_code=502)
+            if job is None:
+                return JSONResponse({'error': f'{name} already has the latest published data'}, status_code=409)
+            return JSONResponse(job.public())
         if name not in SUPPORTED:
             return JSONResponse({'error': f'{name} is not published in the monthly archive'}, status_code=400)
         try:

@@ -105,20 +105,26 @@ function downloadRequestCard(event) {
   from.oninput = to.oninput = update;
   const months = el('div', 'months');
   for (const [label, input] of [['From', from], ['To', to]]) { const l = el('label', '', label); l.append(input); months.append(l); }
+  const recent = el('input'); recent.type = 'checkbox'; recent.checked = true;
+  const recentBox = el('label', 'toggle');
+  if (event.recent && plan.live && plan.live.available) {
+    recentBox.append(recent, ` Also fetch AEMO's recent reports after the monthly archive`
+      + (plan.live.through ? ` (to ${plan.live.through.slice(0, 16)}, about ${formatBytes(plan.live.size)})` : ''));
+  }
   const approve = el('button', 'primary', 'Download'), decline = el('button', '', 'Not now');
   const buttons = el('div', 'buttons'); buttons.append(decline, approve);
   const status = el('div', 'download-status');
   const decide = async ok => {
-    approve.disabled = decline.disabled = from.disabled = to.disabled = true;
+    approve.disabled = decline.disabled = from.disabled = to.disabled = recent.disabled = true;
     const response = await fetch('/api/chat/decision', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, request: event.id, approve: ok, start: from.value, end: to.value }),
+      body: JSON.stringify({ conversation, request: event.id, approve: ok, start: from.value, end: to.value, recent: recent.checked }),
     });
     if (!response.ok) status.textContent = (await response.json()).error;
   };
   approve.onclick = () => decide(true);
   decline.onclick = () => decide(false);
-  card.append(head, el('p', 'reason', event.reason), el('p', 'muted', event.comment), months, estimate, buttons, status);
+  card.append(head, el('p', 'reason', event.reason), el('p', 'muted', event.comment), months, estimate, recentBox, buttons, status);
   update();
   card.dataset.request = event.id;
   return card;
@@ -140,7 +146,7 @@ function updateDownloadCard(card, event) {
     cancel.onclick = () => { cancel.disabled = true; cancelDownload(job.id); };
     status.replaceChildren(bar, el('div', 'muted', jobSummary(job)), cancel);
   } else if (job.status === 'done') {
-    status.replaceChildren(el('span', 'ok', `✓ Downloaded ${job.table} (${job.start.slice(0, 7)} to ${job.end.slice(0, 7)}).`));
+    status.replaceChildren(el('span', 'ok', `✓ Downloaded ${job.table} (${jobRange(job)}).`));
   } else if (job.status === 'cancelled') {
     status.replaceChildren(el('span', 'muted', 'Download cancelled.'));
   } else {

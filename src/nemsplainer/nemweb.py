@@ -116,9 +116,9 @@ class _Links(HTMLParser):
         self._text = ''
 
 
-def _listing(url: str) -> list[str]:
+def _listing(url: str, ttl: float = LISTING_TTL) -> list[str]:
     cached = _listings.get(url)
-    if cached and time.monotonic() - cached[0] < LISTING_TTL:
+    if cached and time.monotonic() - cached[0] < ttl:
         return cached[1]
     try:
         text = _polite(url, lambda response: response.read().decode('utf-8-sig'))
@@ -285,28 +285,48 @@ def _value(value: str, kind: str) -> None:
         raise ValueError(f'number has excess fractional digits for {kind}')
 
 
-def normalize(archive: Path, table: Table, directory: Path, url: str) -> list[tuple[Path, tuple[str, ...], str]]:
-    """Validate complete C/I/D members, returning one CSV per selected I segment."""
+def _csv_members(source: zipfile.ZipFile, prefix: str = ''):
+    """Yield (name, open function) for every CSV, descending into nested ZIPs.
+
+    Daily report archives hold one inner ZIP per 5-minute interval.
+    """
+    for member in source.infolist():
+        if member.is_dir():
+            continue
+        name = prefix + member.filename
+        if member.filename.lower().endswith('.zip'):
+            with zipfile.ZipFile(io.BytesIO(source.read(member))) as inner:
+                yield from _csv_members(inner, name + ' / ')
+        elif member.filename.lower().endswith('.csv'):
+            yield name, (lambda member=member: source.open(member))
+        else:
+            raise RuntimeError(f'{name}: unexpected non-CSV ZIP member')
+
+
+def normalize(archive: Path, table: Table, directory: Path, url: str,
+              required: bool = True) -> list[tuple[Path, tuple[str, ...], str]]:
+    """Validate complete C/I/D members, returning one CSV per selected table version and header.
+
+    With ``required=False`` an archive without the table yields no outputs
+    instead of failing (report files carry several tables, not always all).
+    """
     outputs = []
+    writers = {}  # (version, header columns) -> header details, shared across members
     context = f'{url} / {table.name}'
     # Tables without a known CSV identity take it from the archive's first I
     # record; archives for these tables are expected to hold one table only.
     identity = [table.dataset, table.csv_table] if table.dataset else None
     try:
         with zipfile.ZipFile(archive) as source, ExitStack() as handles:
-            for member in source.infolist():
-                if member.is_dir():
-                    continue
-                context = f'{url} / {member.filename} / {table.name}'
-                if not member.filename.lower().endswith('.csv'):
-                    raise RuntimeError(f'{context}: unexpected non-CSV ZIP member')
+            for member_name, open_member in _csv_members(source):
+                context = f'{url} / {member_name} / {table.name}'
                 headers = {}
                 ended = False
                 count = 0
-                with source.open(member) as raw, io.TextIOWrapper(raw, encoding='utf-8-sig', newline='') as text:
+                with open_member() as raw, io.TextIOWrapper(raw, encoding='utf-8-sig', newline='') as text:
                     rows = csv.reader(text, strict=True)
                     for count, row in enumerate(rows, 1):
-                        context = f'{url} / {member.filename} / {table.name} / record {count}'
+                        context = f'{url} / {member_name} / {table.name} / record {count}'
                         if not row:
                             raise RuntimeError(f'{context}: empty envelope record')
                         if ended:
@@ -343,16 +363,18 @@ def normalize(archive: Path, table: Table, directory: Path, url: str) -> list[tu
                             missing = set(table.primary_key) - set(columns)
                             if missing:
                                 raise RuntimeError(f'{context}: missing primary key columns {sorted(missing)}')
-                            supplied = tuple(name for name in table.columns if name in columns)
-                            order = tuple(columns.index(name) + 4 for name in supplied)
-                            key_positions = tuple(columns.index(name) + 4 for name in table.primary_key)
-                            output = handles.enter_context(tempfile.NamedTemporaryFile(
-                                mode='w', encoding='utf-8', newline='', suffix='.csv',
-                                prefix='normalized-', dir=directory, delete=False))
-                            writer = csv.writer(output)
-                            writer.writerow(supplied)
-                            outputs.append((Path(output.name), supplied, context))
-                            headers[version] = (len(row), order, key_positions, writer, supplied)
+                            if (version, columns) not in writers:
+                                supplied = tuple(name for name in table.columns if name in columns)
+                                order = tuple(columns.index(name) + 4 for name in supplied)
+                                key_positions = tuple(columns.index(name) + 4 for name in table.primary_key)
+                                output = handles.enter_context(tempfile.NamedTemporaryFile(
+                                    mode='w', encoding='utf-8', newline='', suffix='.csv',
+                                    prefix='normalized-', dir=directory, delete=False))
+                                writer = csv.writer(output)
+                                writer.writerow(supplied)
+                                outputs.append((Path(output.name), supplied, context))
+                                writers[version, columns] = (len(row), order, key_positions, writer, supplied)
+                            headers[version] = writers[version, columns]
                         elif row[0] == 'D':
                             if version not in headers:
                                 raise RuntimeError(f'{context}: selected data before matching I header')
@@ -373,7 +395,7 @@ def normalize(archive: Path, table: Table, directory: Path, url: str) -> list[tu
                             raise RuntimeError(f'{context}: unexpected selected record kind {row[0]!r}')
                 if not ended:
                     raise RuntimeError(f'{context}: missing END OF REPORT')
-        if not outputs:
+        if not outputs and required:
             raise RuntimeError(f'{url} / {table.name}: no matching I header in archive')
         return outputs
     except (OSError, UnicodeError, csv.Error, zipfile.BadZipFile, EOFError, RuntimeError, zlib.error) as exc:

@@ -160,8 +160,8 @@ def _mark(c, name, url, digest, lower, upper):
     c.execute('INSERT INTO _nemsplainer.files VALUES (?, ?, ?, ?, ?, current_timestamp) ON CONFLICT DO NOTHING', [url, digest, name, lower, upper])
 
 
-def _load_file(c, table, target, path, directory, url, lower=None, upper=None):
-    normalized = nemweb.normalize(path, table, directory, url)
+def _load_file(c, table, target, path, directory, url, lower=None, upper=None, required=True):
+    normalized = nemweb.normalize(path, table, directory, url, required=required)
     for csv_path, supplied, context in normalized:
         if lower is None:
             _merge(c, table, target, csv_path, supplied, context)

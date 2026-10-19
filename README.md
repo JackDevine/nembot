@@ -92,6 +92,11 @@ downloaded, and a filterable, paged view of the data.
 Use **Download…** on any table to fetch months from AEMO (with a size estimate;
 some tables are many GB per month). **Refresh** fetches the months published
 since your last download; tables with newer published data are marked with ●.
+For some tables (dispatch prices, regional
+summaries, interconnector flows, unit SCADA and dispatch targets, trading
+prices, rooftop PV) **Get latest** also fetches AEMO's recent daily and
+5-minute reports, so you can have data up to the last few minutes rather than
+the end of the last monthly archive.
 Downloads run in the background with progress and a Cancel button. The web app
 holds the database open for writing, so stop it before using the CLI.
 

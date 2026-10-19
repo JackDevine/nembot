@@ -32,6 +32,9 @@ class ConfigLoad(unittest.TestCase):
     def test_flags_replace_config_and_connection_is_released(self):
         import duckdb
         from test_ingest import MonthlyArchive
+        from nemsplainer import nemweb
+        nemweb.clear_cache()
+        self.addCleanup(nemweb.clear_cache)
 
         network = MonthlyArchive()
         network.add_file('DISPATCHPRICE', 2026, 8, [dict(
@@ -47,7 +50,7 @@ class ConfigLoad(unittest.TestCase):
             for config_flags in (['--config', str(config)], ['--cache-dir', str(root / 'cache')]):
                 database = root / f'actual{len(observations)}.duckdb'
                 argv = ['nemsplainer', *config_flags, '--tables', 'DISPATCHPRICE', '--start', '2026-08-01', '--end', '2026-08-01', '--database', str(database)]
-                with patch.object(sys, 'argv', argv), patch('urllib.request.urlopen', side_effect=network.open), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                with patch.object(sys, 'argv', argv), patch('urllib.request.urlopen', side_effect=network.open), patch('nemsplainer.nemweb.REQUEST_INTERVAL', 0), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     main()
                 with duckdb.connect(str(database)) as c:
                     observations.append(c.sql('SELECT REGIONID, RRP FROM DISPATCHPRICE').fetchall())

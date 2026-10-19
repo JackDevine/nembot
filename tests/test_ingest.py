@@ -17,7 +17,7 @@ import zipfile
 
 import duckdb
 
-from nemsplainer import load_mms
+from nemsplainer import load_mms, nemweb
 
 
 ROOT = "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/"
@@ -167,6 +167,11 @@ class IngestTests(unittest.TestCase):
         self.database = self.root / "store" / "nem.duckdb"
         self.cache = self.root / "cache"
         self.network = MonthlyArchive()
+        interval_patch = patch("nemsplainer.nemweb.REQUEST_INTERVAL", 0)
+        interval_patch.start()
+        self.addCleanup(interval_patch.stop)
+        nemweb.clear_cache()
+        self.addCleanup(nemweb.clear_cache)
         network_patch = patch("urllib.request.urlopen", side_effect=self.network.open)
         self.urlopen = network_patch.start()
         self.addCleanup(network_patch.stop)
@@ -174,6 +179,8 @@ class IngestTests(unittest.TestCase):
         self.stderr = StringIO()
 
     def load(self, tables=("DISPATCHPRICE",), start="2024-02-01", end="2024-02-29", *, database=None):
+        # Each load is a separate run; listings are only cached within a process.
+        nemweb.clear_cache()
         with redirect_stdout(self.stdout), redirect_stderr(self.stderr):
             return load_mms(tables, start, end, database=database or self.database, cache_dir=self.cache)
 

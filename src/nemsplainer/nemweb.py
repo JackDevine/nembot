@@ -1,6 +1,6 @@
 """Monthly MMS archive discovery, validated caching, and streaming CSV envelopes."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 import csv
 from datetime import date, datetime
@@ -9,9 +9,12 @@ import hashlib
 from html.parser import HTMLParser
 from http.client import HTTPException
 import io
+import os
 from pathlib import Path
 import re
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,6 +24,59 @@ import zlib
 from .tables import Table
 
 ROOT = 'https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/'
+
+# Courtesy towards AEMO: every request goes through _polite(), which allows one
+# request at a time process-wide, spaces requests out, identifies us honestly,
+# and backs off on throttling or server errors. Listings are cached briefly and
+# ZIPs indefinitely (see download), so reruns cost NEMWEB almost nothing.
+USER_AGENT = 'nemsplainer/0.1 (personal NEM analysis tool; sequential, cached downloads)'
+REQUEST_INTERVAL = float(os.environ.get('NEMSPLAINER_REQUEST_INTERVAL', '1.0'))  # seconds between requests
+LISTING_TTL = 3600
+MAX_ATTEMPTS = 4
+BACKOFF = 5.0  # seconds; doubles each retry unless the server sends Retry-After
+_RETRY_STATUS = {429, 500, 502, 503, 504}
+_lock = threading.RLock()
+_last_request = 0.0
+_listings: dict[str, tuple[float, list[str]]] = {}
+
+
+def clear_cache() -> None:
+    _listings.clear()
+
+
+def _retry_delay(exc: Exception, attempt: int) -> float | None:
+    """Seconds to wait before retrying, or None if the error is not transient."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code not in _RETRY_STATUS:
+            return None
+        retry_after = exc.headers.get('Retry-After') if exc.headers else None
+        if retry_after and retry_after.isdigit():
+            return min(float(retry_after), 300.0)
+    elif not isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, HTTPException)):
+        return None
+    return BACKOFF * 2 ** attempt
+
+
+def _polite[T](url: str, consume: Callable[[object], T]) -> T:
+    """Open ``url`` and hand the response to ``consume``, politely and with retries."""
+    global _last_request
+    with _lock:
+        for attempt in range(MAX_ATTEMPTS):
+            wait = _last_request + REQUEST_INTERVAL - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    return consume(response)
+            except Exception as exc:
+                delay = _retry_delay(exc, attempt)
+                if delay is None or attempt == MAX_ATTEMPTS - 1:
+                    raise
+                time.sleep(delay)
+            finally:
+                _last_request = time.monotonic()
+        raise AssertionError('unreachable')
 
 
 class _Unavailable(RuntimeError):
@@ -40,9 +96,11 @@ class _Links(HTMLParser):
 
 
 def _listing(url: str) -> list[str]:
+    cached = _listings.get(url)
+    if cached and time.monotonic() - cached[0] < LISTING_TTL:
+        return cached[1]
     try:
-        with urllib.request.urlopen(url, timeout=60) as response:
-            text = response.read().decode('utf-8-sig')
+        text = _polite(url, lambda response: response.read().decode('utf-8-sig'))
     except urllib.error.HTTPError as exc:
         error = _Unavailable if exc.code == 404 else RuntimeError
         raise error(f'{url}: cannot read monthly listing: {exc}') from exc
@@ -67,6 +125,7 @@ def _listing(url: str) -> list[str]:
         # Canonical escaping also prevents encoded slashes/traversal escaping scope.
         links.add(urllib.parse.urlunsplit((parts.scheme, parts.netloc,
                   urllib.parse.quote(path, safe='/'), '', '')))
+    _listings[url] = (time.monotonic(), sorted(links))
     return sorted(links)
 
 
@@ -149,9 +208,12 @@ def download(url: str, cache_dir: Path) -> tuple[Path, str]:
             except (OSError, RuntimeError, zipfile.BadZipFile, EOFError, zlib.error) as exc:
                 path.unlink(missing_ok=True)
                 raise RuntimeError(f'invalid cached ZIP removed: {exc}') from exc
-        with urllib.request.urlopen(url, timeout=60) as response, partial.open('wb') as target:
-            while chunk := response.read(1024 * 1024):
-                target.write(chunk)
+        def save(response):
+            with partial.open('wb') as target:
+                while chunk := response.read(1024 * 1024):
+                    target.write(chunk)
+
+        _polite(url, save)  # a retry rewrites the partial file from scratch
         digest = _validate_zip(partial)
         partial.replace(path)
         return path, digest

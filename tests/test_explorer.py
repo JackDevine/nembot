@@ -63,5 +63,40 @@ class Explorer(unittest.TestCase):
         self.assertEqual(page['total'], 577 * 2)
 
 
+
+class Filters(Explorer):
+    def total(self, filters=None, search=None):
+        return explorer.rows(self.db, 'DISPATCHPRICE', filters=filters, search=search)['total']
+
+    def test_operators_follow_marimo(self):
+        self.assertEqual(self.total([{'column': 'REGIONID', 'operator': 'in', 'values': ['SA1']}]), 577)
+        self.assertEqual(self.total([{'column': 'REGIONID', 'operator': 'not_in', 'values': ['SA1']}]), 577)
+        self.assertEqual(self.total([{'column': 'RRP', 'operator': 'between', 'min': 1, 'max': 10}]), 20)
+        self.assertEqual(self.total([{'column': 'RRP', 'operator': '>', 'value': 570}]), 14)
+        self.assertEqual(self.total([{'column': 'REGIONID', 'operator': 'starts_with', 'value': 'NS'}]), 577)
+        self.assertEqual(self.total([{'column': 'REGIONID', 'operator': 'contains', 'value': 'sa'}]), 0)  # case-sensitive
+        self.assertEqual(self.total([{'column': 'REGIONID', 'operator': 'regex', 'value': '^(SA|NSW)1$'}]), 1154)
+        self.assertEqual(self.total([{'column': 'EEP', 'operator': 'is_null'}]), 1154)
+        self.assertEqual(self.total([{'column': 'SETTLEMENTDATE', 'operator': '>=', 'value': '2026-06-02'}]), 580)  # intervals 288..577, two regions
+        self.assertEqual(self.total([{'column': 'RRP', 'operator': '<=', 'value': 5},
+                                     {'column': 'REGIONID', 'operator': 'equals', 'value': 'SA1'}]), 5)
+
+    def test_search_is_case_insensitive_and_literal(self):
+        self.assertEqual(self.total(search='sa1'), 577)
+        self.assertEqual(self.total(search='%'), 0)
+
+    def test_top_values_ignore_the_columns_own_filter(self):
+        result = explorer.top_values(self.db, 'DISPATCHPRICE', 'REGIONID',
+                                     filters=[{'column': 'REGIONID', 'operator': 'in', 'values': ['SA1']},
+                                              {'column': 'RRP', 'operator': '<=', 'value': 10}])
+        self.assertEqual(result['values'], [['NSW1', 10], ['SA1', 10]])
+
+    def test_bad_filters_are_rejected(self):
+        for bad in ([{'column': 'RRP; DROP', 'operator': '=='}], [{'column': 'RRP', 'operator': 'contains', 'value': '1'}],
+                    [{'column': 'REGIONID', 'operator': 'in', 'values': []}], ['x']):
+            with self.assertRaises(ValueError, msg=bad):
+                self.total(bad)
+
+
 if __name__ == '__main__':
     unittest.main()

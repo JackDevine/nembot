@@ -195,41 +195,38 @@ function filterBar(d) {
       field(`${label} (${d.time_column})`, inputBox).onchange = () => { q[key] = inputBox.value; q.offset = 0; loadRows(); };
     }
   }
-  for (const [column, values] of Object.entries(d.filters)) {
-    let control;
-    if (values) {
-      control = el('select');
-      control.append(new Option('All', ''), ...values.map(v => new Option(v, v)));
-      control.value = q.values[column] || '';
-      control.onchange = () => { q.values[column] = control.value; q.offset = 0; loadRows(); };
-    } else {
-      control = el('input'); control.type = 'search'; control.placeholder = 'exact match'; control.value = q.values[column] || '';
-      let timer;
-      control.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { q.values[column] = control.value.trim().toUpperCase(); q.offset = 0; loadRows(); }, 400); };
-    }
-    field(column, control);
-  }
   bar.onsubmit = e => e.preventDefault();
   return bar;
 }
 
-// The data view: a marimo-style table paged and sorted on the server.
+// Query parameters shared by the rows and values endpoints: the date range plus the table's search and filters.
+function explorerParams(base, search, filters) {
+  const q = explorer.query;
+  const params = new URLSearchParams(base);
+  if (q.start) params.set('start', q.start);
+  if (q.end) params.set('end', q.end);
+  if (search) params.set('q', search);
+  if (filters && filters.length) params.set('filters', JSON.stringify(filters));
+  return params;
+}
+
+// The data view: a marimo-style table paged, sorted, searched and filtered on the server.
 function dataGrid(d) {
   const docs = Object.fromEntries(d.columns.map(c => [c.name, c]));
   const kind = type => /^(DECIMAL|DOUBLE|BIGINT|INTEGER)/.test(type) ? 'number' : type === 'TIMESTAMP' ? 'datetime' : 'string';
   return createDataTable({
     columns: d.columns.map(c => ({ name: c.name, type: kind(c.type), dtype: c.type })),
     pageSize: explorer.query.limit,
-    async fetchPage({ offset, limit, sort }) {
-      const q = explorer.query;
-      q.limit = limit;
-      const params = new URLSearchParams({ offset, limit });
-      if (q.start) params.set('start', q.start);
-      if (q.end) params.set('end', q.end);
-      for (const [k, v] of Object.entries(q.values)) if (v) params.set(k, v);
+    async fetchPage({ offset, limit, sort, search, filters }) {
+      explorer.query.limit = limit;
+      const params = explorerParams({ offset, limit }, search, filters);
       if (sort) { params.set('sort', sort.column); params.set('order', sort.desc ? 'desc' : 'asc'); }
       const data = await getJSON(`/api/explorer/tables/${d.name}/rows?${params}`);
       return { rows: data.rows, total: data.total };
+    },
+    async fetchValues({ column, search, filters }) {
+      const params = explorerParams({ column }, search, filters);
+      return (await getJSON(`/api/explorer/tables/${d.name}/values?${params}`)).values;
     },
     decorateHeader(th, column) {
       if (!docs[column.name]) return;

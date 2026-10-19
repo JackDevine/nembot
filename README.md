@@ -73,6 +73,17 @@ how marimo shows a dataframe, you get the same experience here:
 - right-aligned tabular numbers at full precision, and `None` pills
 - search, and Export to CSV / JSON / Markdown
 - the familiar "1,234 rows, 5 columns · 10 / page · Page 1 of N" footer
+- **drag across cells** to highlight them in green, with Count / Sum / Average
+  for the selection in the footer. Shift-click and Shift+arrows extend the
+  selection, Ctrl/Cmd+A selects the page, and Ctrl/Cmd+C copies it as
+  tab-separated text.
+- **filters** as pills above the table:
+  - set them from the column menu (Filter / Filter by values) or by
+    right-clicking a cell (Filter by this value / Remove rows with this value)
+  - marimo's operators per column type: between, comparisons, contains, starts
+    with, regex, is in / not in with value counts, is null…
+- a **Columns** button to show and hide columns, **Wrap text** per column, and
+  an **Explore** panel that shows one row at a time
 
 The table was copied from marimo's open-source code (Apache-2.0) and rewritten
 as plain JavaScript, with no React; see [Acknowledgements](#acknowledgements).

@@ -221,6 +221,17 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': str(exc)}, status_code=500)
         return RedirectResponse(target)
 
+    async def explorer_values(request: Request):
+        query = request.query_params
+        try:
+            result = await asyncio.to_thread(
+                explorer.top_values, db, request.path_params['name'].upper(), str(query.get('column', '')),
+                filters=json.loads(query.get('filters') or '[]'), search=query.get('q') or None,
+                start=explorer.parse_date(query.get('start')), end=explorer.parse_date(query.get('end')))
+        except (ValueError, duckdb.Error) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+        return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
+
     async def plugin_list(request: Request):
         return JSONResponse({'plugins': [p.public() for p in plugin_manager.plugins.values()],
                              'directory': str(plugin_manager.directory)})
@@ -282,10 +293,14 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             options = dict(offset=int(query.get('offset', 0)), limit=int(query.get('limit', 25)),
                            start=explorer.parse_date(query.get('start')), end=explorer.parse_date(query.get('end')),
                            values={k: query[k] for k in explorer.FILTER_COLUMNS if query.get(k)},
-                           sort=query.get('sort'), descending=query.get('order') == 'desc')
+                           sort=query.get('sort'), descending=query.get('order') == 'desc',
+                           filters=json.loads(query.get('filters') or '[]'), search=query.get('q') or None)
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=400)
-        result = await asyncio.to_thread(explorer.rows, db, request.path_params['name'].upper(), **options)
+        try:
+            result = await asyncio.to_thread(explorer.rows, db, request.path_params['name'].upper(), **options)
+        except (ValueError, duckdb.Error) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
         return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
 
     async def freshness(request: Request):
@@ -371,6 +386,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/explorer', explorer_overview),
         Route('/api/explorer/tables/{name}', explorer_table),
         Route('/api/explorer/tables/{name}/rows', explorer_rows),
+        Route('/api/explorer/tables/{name}/values', explorer_values),
         Route('/api/explorer/freshness', freshness),
         Route('/api/downloads', download_jobs, methods=['GET', 'POST']),
         Route('/api/downloads/plan/{name}', download_plan),

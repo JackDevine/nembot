@@ -73,6 +73,122 @@ def _filters(entry: dict, start: str | None, end: str | None, values: dict[str, 
     return (' WHERE ' + ' AND '.join(clauses)) if clauses else '', params
 
 
+# Filter operators per column type, as in marimo's data table (filters/operators.ts).
+OPERATORS = {
+    'number': {'between', '==', '!=', '>', '>=', '<', '<=', 'in', 'not_in', 'is_null', 'is_not_null'},
+    'text': {'contains', 'equals', 'does_not_equal', 'regex', 'starts_with', 'ends_with', 'in', 'not_in',
+             'is_empty', 'is_null', 'is_not_null'},
+    'datetime': {'between', '==', '!=', '>', '>=', '<', '<=', 'is_null', 'is_not_null'},
+    'boolean': {'is_true', 'is_false', 'is_null', 'is_not_null'},
+}
+_COMPARE = {'==': '=', '!=': '<>', '>': '>', '>=': '>=', '<': '<', '<=': '<=', 'equals': '=', 'does_not_equal': '<>'}
+
+
+def filter_type(duckdb_type: str) -> str:
+    if duckdb_type.startswith(('DECIMAL', 'DOUBLE', 'BIGINT', 'INTEGER')):
+        return 'number'
+    if duckdb_type in ('TIMESTAMP', 'DATE'):
+        return 'datetime'
+    if duckdb_type == 'BOOLEAN':
+        return 'boolean'
+    return 'text'
+
+
+def conditions(entry: dict, filters: list, search: str | None, exclude: str | None = None) -> tuple[list[str], list]:
+    """SQL conditions for marimo-style column filters (ANDed) plus a search over every column.
+
+    Column names come only from the catalogue; every value is a parameter.
+    Semantics follow marimo: text `contains` is case-sensitive and literal,
+    `between` is inclusive, `not_in` keeps nulls, search is case-insensitive.
+    """
+    types = {c['name']: filter_type(c['type']) for c in entry['columns']}
+    clauses, params = [], []
+    for item in filters or []:
+        if not isinstance(item, dict):
+            raise ValueError('each filter must be an object')
+        column, op = item.get('column'), item.get('operator')
+        if column not in types or column == exclude:
+            if column not in types:
+                raise ValueError(f'unknown filter column {column!r}')
+            continue
+        kind = types[column]
+        if op not in OPERATORS[kind]:
+            raise ValueError(f'operator {op!r} does not apply to {kind} column {column}')
+        col = _q(column)
+        cast = 'TIMESTAMP' if kind == 'datetime' else None
+        if op == 'is_null':
+            clauses.append(f'{col} IS NULL')
+        elif op == 'is_not_null':
+            clauses.append(f'{col} IS NOT NULL')
+        elif op == 'is_true':
+            clauses.append(f'{col} = true')
+        elif op == 'is_false':
+            clauses.append(f'{col} = false')
+        elif op == 'is_empty':
+            clauses.append(f"{col} = ''")
+        elif op == 'between':
+            clauses.append(f'{col} BETWEEN ?{"::" + cast if cast else ""} AND ?{"::" + cast if cast else ""}')
+            params += [item.get('min'), item.get('max')]  # DuckDB casts parameters to the column type
+        elif op in _COMPARE:
+            clauses.append(f'{col} {_COMPARE[op]} ?{"::" + cast if cast else ""}')
+            params.append(item.get('value'))
+        elif op == 'contains':
+            clauses.append(f"contains(coalesce({col}, ''), ?)")
+            params.append(str(item.get('value', '')))
+        elif op == 'starts_with':
+            clauses.append(f"starts_with(coalesce({col}, ''), ?)")
+            params.append(str(item.get('value', '')))
+        elif op == 'ends_with':
+            clauses.append(f"suffix(coalesce({col}, ''), ?)")
+            params.append(str(item.get('value', '')))
+        elif op == 'regex':
+            clauses.append(f"regexp_matches(coalesce({col}, ''), ?)")
+            params.append(str(item.get('value', '')))
+        elif op in ('in', 'not_in'):
+            values = item.get('values') or []
+            if not isinstance(values, list) or not values:
+                raise ValueError(f'{op} needs a non-empty list of values')
+            present = [v for v in values if v is not None]
+            inside = f"{col} IN ({', '.join('?' * len(present))})" if present else 'false'
+            if op == 'in':
+                clauses.append(f'({inside} OR {col} IS NULL)' if None in values else f'({inside})')
+            else:
+                clauses.append(f'(NOT ({inside}) AND {col} IS NOT NULL)' if None in values else f'(NOT ({inside}) OR {col} IS NULL)')
+            params += present
+    if search:
+        pattern = '%' + search.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        clauses.append('(' + ' OR '.join(f"CAST({_q(c['name'])} AS VARCHAR) ILIKE ? ESCAPE '\\'"
+                                         for c in entry['columns']) + ')')
+        params += [pattern] * len(entry['columns'])
+    return clauses, params
+
+
+def top_values(db: duckdb.DuckDBPyConnection, name: str, column: str, *, filters: list | None = None,
+               search: str | None = None, start: str | None = None, end: str | None = None, k: int = 30) -> dict | None:
+    """The most common values of ``column`` with counts (marimo's filter-by-values picker).
+
+    Filters on the same column are ignored, so the picker shows what you could choose.
+    """
+    entry = catalog.tables().get(name)
+    if entry is None:
+        return None
+    if column not in {c['name'] for c in entry['columns']}:
+        raise ValueError(f'unknown column {column!r}')
+    where, params = _filters(entry, start, end, {})
+    extra, extra_params = conditions(entry, filters or [], search, exclude=column)
+    clauses = ([where.removeprefix(' WHERE ')] if where else []) + extra
+    sql_where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    cursor = db.cursor()
+    try:
+        if name not in _downloaded(cursor):
+            return {'values': []}
+        rows = cursor.execute(f'SELECT {_q(column)}, count(*) AS n FROM {_q(name)}{sql_where} GROUP BY 1 '
+                              f'ORDER BY n DESC, 1 NULLS LAST LIMIT ?', params + extra_params + [k]).fetchall()
+    finally:
+        cursor.close()
+    return {'values': [[_jsonable(v), n] for v, n in rows], 'k': k}
+
+
 def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
     entry = catalog.tables().get(name)
     if entry is None:
@@ -113,13 +229,18 @@ def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
 
 def rows(db: duckdb.DuckDBPyConnection, name: str, *, offset: int = 0, limit: int = 25,
          start: str | None = None, end: str | None = None, values: dict[str, str] | None = None,
-         sort: str | None = None, descending: bool = False) -> dict | None:
+         sort: str | None = None, descending: bool = False, filters: list | None = None,
+         search: str | None = None) -> dict | None:
     entry = catalog.tables().get(name)
     if entry is None:
         return None
     limit = limit if limit in PAGE_SIZES else 25
     offset = max(0, offset)
     where, params = _filters(entry, start, end, values or {})
+    extra, extra_params = conditions(entry, filters or [], search)
+    if extra:
+        where = (where + ' AND ' if where else ' WHERE ') + ' AND '.join(extra)
+        params = params + extra_params
     column = catalog.time_column(name)
     # Newest first for time series; otherwise in primary-key order.
     keys = [column] if column else []

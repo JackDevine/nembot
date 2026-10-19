@@ -224,6 +224,9 @@ function dataGrid(d) {
       const data = await getJSON(`/api/explorer/tables/${d.name}/rows?${params}`);
       return { rows: data.rows, total: data.total };
     },
+    async fetchSummaries({ search, filters }) {
+      return getJSON(`/api/explorer/tables/${d.name}/summaries?${explorerParams({}, search, filters)}`);
+    },
     async fetchValues({ column, search, filters }) {
       const params = explorerParams({ column }, search, filters);
       return (await getJSON(`/api/explorer/tables/${d.name}/values?${params}`)).values;

@@ -232,6 +232,17 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': str(exc)}, status_code=400)
         return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
 
+    async def explorer_summaries(request: Request):
+        query = request.query_params
+        try:
+            result = await asyncio.to_thread(
+                explorer.summaries, db, request.path_params['name'].upper(),
+                filters=json.loads(query.get('filters') or '[]'), search=query.get('q') or None,
+                start=explorer.parse_date(query.get('start')), end=explorer.parse_date(query.get('end')))
+        except (ValueError, duckdb.Error) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+        return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
+
     async def plugin_list(request: Request):
         return JSONResponse({'plugins': [p.public() for p in plugin_manager.plugins.values()],
                              'directory': str(plugin_manager.directory)})
@@ -387,6 +398,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/explorer/tables/{name}', explorer_table),
         Route('/api/explorer/tables/{name}/rows', explorer_rows),
         Route('/api/explorer/tables/{name}/values', explorer_values),
+        Route('/api/explorer/tables/{name}/summaries', explorer_summaries),
         Route('/api/explorer/freshness', freshness),
         Route('/api/downloads', download_jobs, methods=['GET', 'POST']),
         Route('/api/downloads/plan/{name}', download_plan),

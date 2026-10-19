@@ -265,7 +265,7 @@ details.test-failed > summary { color: #cf222e; }
 .mo-body > .mo-table { flex: 1; min-width: 0; }
 .mo-td.mo-selected { background: var(--mo-green-3); }
 .mo-td.mo-copied, .mo-td.mo-context { background: var(--mo-green-4); transition: background-color .15s; }
-.mo-grid tbody { user-select: text; }
+.mo-grid tbody { user-select: none; }  /* cell ranges replace text selection, as in marimo */
 .mo-td.mo-wrap { white-space: pre-wrap; min-width: 200px; overflow: visible; }
 .mo-td.mo-wrap .mo-cell { overflow: visible; }
 .mo-row.mo-viewed { background: var(--mo-blue-3); }
@@ -333,3 +333,10 @@ details.test-failed > summary { color: #cf222e; }
 .mo-viewer-empty { padding: 12px; }
 .mo-filter-editor.mo-has-picker { align-items: flex-start; }
 .mo-filter-editor.mo-has-picker .mo-editor-actions { padding-top: 20px; }
+
+/* Column summaries under headers (marimo column-summary.tsx: flex col, centred, text-xs muted) */
+.mo-th-heading { display: flex; flex-direction: column; align-items: flex-start; }
+.mo-summary { display: flex; flex-direction: column; align-items: center; align-self: stretch; font-size: 12px; line-height: 16px; font-weight: 400; color: var(--mo-muted-foreground); margin-top: 4px; }
+.mo-summary-chart { min-width: 80px; min-height: 40px; max-height: 44px; }
+.mo-summary-range { display: flex; justify-content: space-between; width: 100%; padding: 0 8px; white-space: pre; font-size: 11px; }
+.mo-summary-text { display: flex; flex-direction: column; white-space: pre; align-self: flex-start; }

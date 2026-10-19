@@ -98,5 +98,28 @@ class Filters(Explorer):
                 self.total(bad)
 
 
+class Summaries(Explorer):
+    def test_stats_and_histograms(self):
+        result = explorer.summaries(self.db, 'DISPATCHPRICE')
+        self.assertTrue(result['enabled'])
+        rrp = result['columns']['RRP']
+        self.assertEqual((rrp['min'], rrp['max'], rrp['nulls'], rrp['unique']), (1.0, 577.0, 0, 577))
+        self.assertEqual(len(rrp['bins']), explorer.SUMMARY_BINS)
+        self.assertEqual(sum(b[2] for b in rrp['bins']), 1154)
+        self.assertAlmostEqual(rrp['median'], 289.0)
+        when = result['columns']['SETTLEMENTDATE']
+        self.assertEqual((when['min'], when['bins'][0][0]), ('2026-06-01 00:05:00', '2026-06-01 00:05:00'))
+        self.assertEqual(result['columns']['REGIONID'], {'nulls': 0, 'unique': 2})
+        self.assertEqual(result['columns']['EEP']['nulls'], 1154)  # all-null column: no bins
+        self.assertNotIn('bins', result['columns']['EEP'])
+
+    def test_summaries_follow_filters_and_the_row_limit(self):
+        filtered = explorer.summaries(self.db, 'DISPATCHPRICE', filters=[{'column': 'REGIONID', 'operator': 'in', 'values': ['SA1']}])
+        self.assertEqual(filtered['total'], 577)
+        from unittest.mock import patch
+        with patch.object(explorer, 'SUMMARY_ROW_LIMIT', 100):
+            self.assertFalse(explorer.summaries(self.db, 'DISPATCHPRICE')['enabled'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -73,6 +73,15 @@ how marimo shows a dataframe, you get the same experience here:
 - right-aligned tabular numbers at full precision, and `None` pills
 - search, and Export to CSV / JSON / Markdown
 - the familiar "1,234 rows, 5 columns · 10 / page · Page 1 of N" footer
+- **column summaries** under each header:
+  - for numbers: a small histogram (9 bins; hover a bar for its range and count,
+    with axis labels at the min, quartiles, p95 and max)
+  - for dates: a histogram with the date range underneath
+  - `unique: N` for text, and true/false counts for booleans
+
+  They follow your search and filters. As in marimo they appear for tables of
+  11 rows or more. marimo stops drawing charts above 20,000 rows; here they're
+  computed in DuckDB, so you get them for tables up to 1,000,000 rows.
 - **drag across cells** to highlight them in green, with Count / Sum / Average
   for the selection in the footer. Shift-click and Shift+arrows extend the
   selection, Ctrl/Cmd+A selects the page, and Ctrl/Cmd+C copies it as

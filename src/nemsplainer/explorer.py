@@ -189,6 +189,95 @@ def top_values(db: duckdb.DuckDBPyConnection, name: str, column: str, *, filters
     return {'values': [[_jsonable(v), n] for v, n in rows], 'k': k}
 
 
+# Column summaries (marimo's header stats and histograms). marimo computes stats up to
+# 1,000,000 rows and charts up to 20,000; DuckDB makes both cheap up to a million.
+SUMMARY_ROW_LIMIT = 1_000_000
+SUMMARY_BINS = 9  # marimo's DEFAULT_BIN_SIZE
+
+
+def summaries(db: duckdb.DuckDBPyConnection, name: str, *, filters: list | None = None, search: str | None = None,
+              start: str | None = None, end: str | None = None) -> dict | None:
+    """Per-column stats and 9-bin histograms over the filtered/searched rows."""
+    entry = catalog.tables().get(name)
+    if entry is None:
+        return None
+    where, params = _filters(entry, start, end, {})
+    extra, extra_params = conditions(entry, filters or [], search)
+    clauses = ([where.removeprefix(' WHERE ')] if where else []) + extra
+    sql_where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    params = params + extra_params
+    cursor = db.cursor()
+    try:
+        if name not in _downloaded(cursor):
+            return {'total': 0, 'enabled': False, 'columns': {}}
+        total = cursor.execute(f'SELECT count(*) FROM {_q(name)}{sql_where}', params).fetchone()[0]
+        if total == 0 or total > SUMMARY_ROW_LIMIT:
+            return {'total': total, 'enabled': False, 'limit': SUMMARY_ROW_LIMIT, 'columns': {}}
+        kinds = {c['name']: filter_type(c['type']) for c in entry['columns']}
+        aggregates, layout = [], []
+        for column, kind in kinds.items():
+            col = _q(column)
+            parts = {'nulls': f'count(*) - count({col})', 'unique': f'count(DISTINCT {col})'}
+            if kind == 'number':
+                parts |= {'min': f'min({col})::DOUBLE', 'max': f'max({col})::DOUBLE',
+                          'quantiles': f'quantile_cont({col}::DOUBLE, [0.25, 0.5, 0.75, 0.95])'}
+            elif kind == 'datetime':
+                parts |= {'min': f'min({col})', 'max': f'max({col})'}
+            elif kind == 'boolean':
+                parts |= {'true': f'count(*) FILTER (WHERE {col})', 'false': f'count(*) FILTER (WHERE NOT {col})'}
+            for key, sql in parts.items():
+                aggregates.append(sql)
+                layout.append((column, key))
+        values = cursor.execute(f'SELECT {", ".join(aggregates)} FROM {_q(name)}{sql_where}', params).fetchone()
+        stats: dict[str, dict] = {column: {} for column in kinds}
+        for (column, key), value in zip(layout, values):
+            if key == 'quantiles':
+                if value:
+                    stats[column] |= dict(zip(('p25', 'median', 'p75', 'p95'), value))
+            else:
+                stats[column][key] = _jsonable(value)
+        # One statement for every histogram: equal-width bins between each column's min and max.
+        selects, bin_params, ranges = [], [], {}
+        for column, kind in kinds.items():
+            info = stats[column]
+            if kind not in ('number', 'datetime') or info.get('min') is None:
+                continue
+            col = _q(column)
+            value_sql = f'{col}::DOUBLE' if kind == 'number' else f'epoch({col})'
+            if kind == 'number':
+                low, high = info['min'], info['max']
+            else:
+                low, high = cursor.execute(f'SELECT min({value_sql}), max({value_sql}) FROM {_q(name)}{sql_where}', params).fetchone()
+            ranges[column] = (low, high)
+            step = (high - low) / SUMMARY_BINS if high > low else 1
+            selects.append(f"SELECT ? AS column_name, least(floor(({value_sql} - ?) / ?)::INTEGER, {SUMMARY_BINS - 1}) AS bucket, "
+                           f"count(*) AS n FROM {_q(name)}{sql_where}{' AND ' if sql_where else ' WHERE '}{col} IS NOT NULL GROUP BY 2")
+            bin_params += [column, low, step] + params
+        counts: dict[str, dict[int, int]] = {}
+        if selects:
+            for column, bucket, n in cursor.execute(' UNION ALL '.join(selects), bin_params).fetchall():
+                counts.setdefault(column, {})[bucket] = n
+        for column, (low, high) in ranges.items():
+            if high == low:
+                bins = [[low, high, sum(counts.get(column, {}).values())]]
+            else:
+                step = (high - low) / SUMMARY_BINS
+                bins = [[low + i * step, low + (i + 1) * step, counts.get(column, {}).get(i, 0)] for i in range(SUMMARY_BINS)]
+            if kinds[column] == 'datetime':  # epoch seconds -> ISO strings
+                bins = [[_epoch_iso(a), _epoch_iso(b), n]
+                        for a, b, n in bins]
+            stats[column]['bins'] = bins
+        return {'total': total, 'enabled': True, 'columns': stats}
+    finally:
+        cursor.close()
+
+
+def _epoch_iso(seconds: float) -> str:
+    """Epoch seconds from DuckDB's epoch(TIMESTAMP) back to a naive ISO timestamp."""
+    from datetime import timezone
+    return datetime.fromtimestamp(seconds, tz=timezone.utc).replace(tzinfo=None).isoformat(sep=' ', timespec='seconds')
+
+
 def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
     entry = catalog.tables().get(name)
     if entry is None:

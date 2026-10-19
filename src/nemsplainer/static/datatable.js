@@ -170,7 +170,9 @@ function moPillValue(filter, type) {
 }
 
 function moTime(v) {
-  const t = Date.parse(String(v).replace(' ', 'T'));
+  const text = String(v);
+  // Date-only strings parse as UTC in JS; read them (like datetimes) as local market time.
+  const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(text) ? `${text}T00:00` : text.replace(' ', 'T'));
   return Number.isNaN(t) ? null : t;
 }
 
@@ -203,6 +205,196 @@ function moMatches(value, filter, type) {
   if (op === 'between') return v >= num(filter.min) && v <= num(filter.max);
   const target = num(filter.value);
   return { '==': v === target, '!=': v !== target, '>': v > target, '>=': v >= target, '<': v < target, '<=': v <= target }[op] ?? true;
+}
+
+// ---- Column summaries: header histograms and stats (marimo column-summary/*) ----
+
+const MO_SUMMARY_BINS = 9;              // marimo DEFAULT_BIN_SIZE
+const MO_SUMMARY_ROW_LIMIT = 1_000_000;  // marimo's stats limit (its chart limit is 20,000; see explorer.py)
+const MO_SUMMARY_MIN_ROWS = 11;          // marimo DEFAULT_SUMMARY_CHARTS_MINIMUM_ROWS
+const MO_BAR_COLOR = '#027864';          // Radix mint-11, marimo's BAR_COLOR
+const MO_NULL_BAR_COLOR = '#cc4e00';     // Radix orange-11, marimo's NULL_BAR_COLOR
+const MO_CHART_HEIGHT = 30, MO_CHART_WIDTH = 70, MO_NULL_BAR_WIDTH = 5;
+
+function moQuantile(sorted, q) {  // linear interpolation, like DuckDB quantile_cont
+  const pos = (sorted.length - 1) * q, lo = Math.floor(pos), hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+function moBins(values, low, high) {
+  if (high === low) return [[low, high, values.length]];
+  const step = (high - low) / MO_SUMMARY_BINS;
+  const counts = new Array(MO_SUMMARY_BINS).fill(0);
+  for (const v of values) counts[Math.min(MO_SUMMARY_BINS - 1, Math.floor((v - low) / step))]++;
+  return counts.map((n, i) => [low + i * step, low + (i + 1) * step, n]);
+}
+
+// The same shape as the server's /summaries response, computed from loaded rows.
+function moClientSummaries(rows, columns) {
+  if (!rows.length || rows.length > MO_SUMMARY_ROW_LIMIT) return { total: rows.length, enabled: false, columns: {} };
+  const out = {};
+  for (const column of columns) {
+    const values = rows.map(r => r[column.index]).filter(v => v !== null && v !== undefined);
+    const info = { nulls: rows.length - values.length, unique: new Set(values.map(String)).size };
+    if (column.filterType === 'number' && values.length) {
+      const sorted = values.map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+      if (sorted.length) {
+        Object.assign(info, { min: sorted[0], max: sorted.at(-1), p25: moQuantile(sorted, 0.25), median: moQuantile(sorted, 0.5),
+          p75: moQuantile(sorted, 0.75), p95: moQuantile(sorted, 0.95), bins: moBins(sorted, sorted[0], sorted.at(-1)) });
+      }
+    } else if (column.filterType === 'datetime' && values.length) {
+      const times = values.map(moTime).filter(t => t !== null);
+      if (times.length) {
+        const low = Math.min(...times), high = Math.max(...times);
+        Object.assign(info, { min: values[times.indexOf(low)], max: values[times.indexOf(high)], bins: moBins(times, low, high) });
+      }
+    } else if (column.filterType === 'boolean') {
+      Object.assign(info, { true: values.filter(v => v === true).length, false: values.filter(v => v === false).length });
+    }
+    out[column.name] = info;
+  }
+  return { total: rows.length, enabled: true, columns: out };
+}
+
+function moIsInteger(column, info) {
+  if (/^(BIGINT|INTEGER|DECIMAL\(\d+,0\))/.test(column.dtype || '')) return true;
+  return [info.min, info.max].every(Number.isInteger) && !/DECIMAL|DOUBLE/.test(column.dtype || '');
+}
+
+function moSummaryBase(values) {
+  return { $schema: 'https://vega.github.io/schema/vega-lite/v6.json', background: 'transparent', data: { values },
+    config: { view: { stroke: 'transparent' }, axis: { domain: false }, concat: { spacing: 0 } } };
+}
+
+function moNullBarSpec(width, nullOnly) {
+  return {
+    height: MO_CHART_HEIGHT, width,
+    ...(nullOnly ? { transform: [{ filter: "datum['bin_start'] === null && datum['bin_end'] === null" }] } : {}),
+    layer: [
+      { mark: { type: 'bar', color: MO_NULL_BAR_COLOR },
+        encoding: { x: { field: 'bin_start', type: 'nominal', axis: null }, y: { field: 'count', type: 'quantitative', axis: null } } },
+      { mark: { type: 'bar', opacity: 0 },
+        encoding: { x: { field: 'bin_start', type: 'nominal', axis: null }, y: { value: 0 }, y2: { value: MO_CHART_HEIGHT },
+          tooltip: [{ field: 'count', type: 'quantitative', title: 'nulls', format: ',d' }] } },
+    ],
+  };
+}
+
+// Port of marimo's ColumnChartSpecModel.getVegaSpec for number and date columns.
+function moSummarySpec(column, info) {
+  const bins = info.bins;
+  if (!bins || !bins.length) {
+    return info.nulls ? { ...moSummaryBase([{ bin_start: null, bin_end: null, count: info.nulls }]), ...moNullBarSpec(MO_CHART_WIDTH, false) } : null;
+  }
+  const temporal = column.filterType === 'datetime';
+  const values = bins.map(([start, end, count]) => ({ bin_start: start, bin_end: end, count }));
+  if (info.nulls) values.push({ bin_start: null, bin_end: null, count: info.nulls });
+  const hover = { condition: [{ param: 'hover', value: 1 }], value: 0.6 };  // UNHOVERED_BAR_OPACITY
+  const hoverParam = [{ name: 'hover', select: { type: 'point', on: 'mouseover', clear: 'mouseout' } }];
+  let histogram;
+  if (bins.length === 1) {  // a single bin (constant column): full-width bar
+    histogram = { height: MO_CHART_HEIGHT, width: MO_CHART_WIDTH, transform: [{ filter: 'datum.bin_start !== null' }],
+      mark: { type: 'bar', color: MO_BAR_COLOR },
+      encoding: { x: { field: 'bin_start', type: 'nominal', axis: null }, y: { field: 'count', type: 'quantitative', axis: null },
+        tooltip: [{ field: 'bin_start', type: temporal ? 'temporal' : 'quantitative', title: column.name }, { field: 'count', type: 'quantitative', title: 'Count', format: ',d' }] } };
+  } else if (temporal) {
+    const step = bins[0][1] - bins[0][0];
+    histogram = {
+      height: MO_CHART_HEIGHT, width: MO_CHART_WIDTH + MO_NULL_BAR_WIDTH,
+      transform: [{ filter: "datum['bin_start'] !== null && datum['bin_end'] !== null" }],
+      layer: [
+        { mark: { type: 'bar', color: MO_BAR_COLOR },
+          encoding: { x: { field: 'bin_start', type: 'temporal', axis: null }, x2: { field: 'bin_end' },
+            y: { field: 'count', type: 'quantitative', axis: null }, opacity: hover } },
+        { mark: { type: 'bar', opacity: 0 }, params: hoverParam,
+          encoding: { x: { field: 'bin_start', type: 'temporal', axis: null }, x2: { field: 'bin_end' }, y: { value: 0 }, y2: { value: MO_CHART_HEIGHT },
+            tooltip: [{ field: 'bin_start', type: 'temporal', format: '%Y-%m-%d %H:%M', title: `${column.name} (start)` },
+              { field: 'bin_end', type: 'temporal', format: '%Y-%m-%d %H:%M', title: `${column.name} (end)` },
+              { field: 'count', type: 'quantitative', title: 'Count', format: ',d' }] } },
+      ],
+    };
+    if (!step) histogram.layer.forEach(layer => { layer.encoding.x.type = 'nominal'; delete layer.encoding.x2; });
+  } else {
+    const format = moIsInteger(column, info) ? ',d' : '.2f';
+    const step = bins[0][1] - bins[0][0];
+    const ticks = [info.min, info.p25, info.median, info.p75, info.p95, info.max].filter(v => typeof v === 'number' && Number.isFinite(v));
+    histogram = {
+      height: MO_CHART_HEIGHT, width: MO_CHART_WIDTH,
+      ...(info.nulls ? { transform: [{ filter: "datum['bin_start'] !== null && datum['bin_end'] !== null" }] } : {}),
+      layer: [
+        { mark: { type: 'bar', color: MO_BAR_COLOR },
+          encoding: { x: { field: 'bin_start', type: 'quantitative', bin: { binned: true, step } }, x2: { field: 'bin_end', axis: null },
+            y: { field: 'count', type: 'quantitative', axis: null }, opacity: hover } },
+        { mark: { type: 'bar', opacity: 0 }, params: hoverParam,
+          encoding: {
+            x: { field: 'bin_start', type: 'quantitative', bin: { binned: true, step },
+              axis: { title: null, labelFontSize: 8.5, labelOpacity: 0.5, values: ticks,
+                labelExpr: "(datum.value >= 10000 || datum.value <= -10000) ? format(datum.value, '.2e') : format(datum.value, '.2~f')" } },
+            x2: { field: 'bin_end_extended' }, y: { value: 0 }, y2: { value: MO_CHART_HEIGHT },
+            tooltip: [{ field: 'bin_range', type: 'nominal', title: column.name }, { field: 'count', type: 'quantitative', title: 'Count', format: ',d' }] },
+          transform: [
+            { calculate: `format(datum.bin_start, '${format}') + ' - ' + format(datum.bin_end, '${format}')`, as: 'bin_range' },
+            { calculate: `datum.bin_end + ${step * 0.1}`, as: 'bin_end_extended' },  // BIN_END_EXTENSION_FACTOR
+          ] },
+      ],
+    };
+  }
+  if (info.nulls) return { ...moSummaryBase(values), resolve: { scale: { y: 'shared' } }, hconcat: [moNullBarSpec(MO_NULL_BAR_WIDTH, true), histogram] };
+  return { ...moSummaryBase(values), ...histogram };
+}
+
+function moShortDate(value) {
+  const t = moTime(value);
+  if (t === null) return String(value);
+  const d = new Date(t);
+  const timed = d.getHours() || d.getMinutes() || d.getSeconds();
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) + (timed ? ` ${d.toTimeString().slice(0, 5)}` : '');
+}
+
+function moScientific(n) {  // marimo prettyScientificNumber(shouldRound)
+  return Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3) ? n.toExponential(2) : n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+const moChartObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    moChartObserver.unobserve(entry.target);
+    entry.target.renderChart?.();
+  }
+}, { rootMargin: '200px' }) : null;
+
+// The summary under a column header: a mini chart (rendered when it scrolls into view) and/or stats text.
+function moSummaryNode(column, info) {
+  const node = el('div', 'mo-summary');
+  const spec = column.filterType === 'number' || column.filterType === 'datetime' ? moSummarySpec(column, info) : null;
+  if (spec && typeof vegaEmbed === 'function') {
+    const chart = el('div', 'mo-summary-chart');
+    chart.renderChart = () => vegaEmbed(chart, spec, { renderer: 'svg', actions: false, theme: 'vox', width: 80, height: 30 })
+      .catch(err => { chart.replaceChildren(); console.warn('summary chart failed', column.name, err); });
+    node.append(chart);
+    moChartObserver ? moChartObserver.observe(chart) : chart.renderChart();
+  }
+  const lines = [];
+  if (column.filterType === 'datetime' && info.min != null) {
+    if (spec) {
+      const range = el('div', 'mo-summary-range');
+      range.append(el('span', '', moShortDate(info.min)));
+      if (info.min !== info.max) range.append(el('span', '', `-${moShortDate(info.max)}`));
+      node.append(range);
+    } else lines.push(`min: ${moShortDate(info.min)}`, `max: ${moShortDate(info.max)}`, `unique: ${moPrettyNumber(info.unique)}`);
+  } else if (column.filterType === 'number' && !spec && info.min != null) {
+    lines.push(`min: ${moScientific(info.min)}`, `max: ${moScientific(info.max)}`, `unique: ${moPrettyNumber(info.unique)}`);
+  } else if (column.filterType === 'boolean') {
+    lines.push(`true: ${moPrettyNumber(info.true ?? 0)}`, `false: ${moPrettyNumber(info.false ?? 0)}`);
+  } else if (column.filterType === 'text') {
+    lines.push(`unique: ${moPrettyNumber(info.unique)}`);
+  }
+  if (lines.length) {
+    const text = el('div', 'mo-summary-text');
+    for (const line of lines) text.append(el('span', '', line));
+    node.append(text);
+  }
+  return node;
 }
 
 // ---- Popovers and menus ----
@@ -280,7 +472,10 @@ function createDataTable(options) {
     hidden: new Set(), wrapped: new Set(), rows: [], total: 0, offset: 0,
     anchor: null, focus: null, copied: false, dragging: false,
     viewer: { open: false, index: 0 },
+    summaryKey: null, summaryNodes: new Map(),
   };
+  // marimo only shows summaries for tables with at least 11 rows.
+  const summariesOn = server ? Boolean(options.fetchSummaries) : allRows.length >= MO_SUMMARY_MIN_ROWS;
   const pageSizes = options.pageSizes || [5, 10, 25, 50, 100];
   const visible = () => columns.filter(c => !state.hidden.has(c.name));
 
@@ -678,7 +873,11 @@ function createDataTable(options) {
       };
       row.append(sortButton, menuButton);
       group.append(row);
-      inner.append(group, el('span', 'mo-th-type', column.dtype || column.type));
+      const heading = el('div', 'mo-th-heading');
+      heading.append(group, el('span', 'mo-th-type', column.dtype || column.type));
+      inner.append(heading);
+      const summary = state.summaryNodes.get(column.name);
+      if (summary) inner.append(summary);  // reused across redraws so charts render once
       th.append(inner);
       if (options.decorateHeader) options.decorateHeader(th, column);
       tr.append(th);
@@ -739,6 +938,31 @@ function createDataTable(options) {
     drawBody();
     drawBottom();
     if (state.viewer.open) drawViewer();
+    loadSummaries();
+  }
+
+  // Summaries depend on the rows matched (search and filters), not on sort or page.
+  async function loadSummaries() {
+    if (!summariesOn) return;
+    const key = JSON.stringify([state.search, state.filters]);
+    if (key === state.summaryKey) return;
+    state.summaryKey = key;
+    let result;
+    try {
+      result = server ? await options.fetchSummaries({ search: state.search, filters: state.filters })
+        : moClientSummaries(clientView(), columns);
+    } catch (err) {
+      console.warn('column summaries unavailable', err);
+      return;
+    }
+    if (key !== state.summaryKey) return;  // filters changed meanwhile
+    state.summaryNodes = new Map();
+    if (result.enabled) {
+      for (const column of columns) {
+        if (result.columns[column.name]) state.summaryNodes.set(column.name, moSummaryNode(column, result.columns[column.name]));
+      }
+    }
+    drawHeader();
   }
 
   // ---- Body with cell range selection (marimo range-focus) ----
@@ -843,9 +1067,11 @@ function createDataTable(options) {
     if (e.button !== 0 || moIsInteractive(e.target)) return;
     const cell = cellAt(e.target);
     if (!cell) return;
+    // Stop the browser's own (blue) text selection: dragging selects a range of cells instead.
+    e.preventDefault();
+    window.getSelection()?.removeAllRanges();
     if (e.shiftKey && state.anchor) {
       state.focus = { r: cell.r, c: cell.c };
-      e.preventDefault();
     } else if (selectedCount() === 1 && state.anchor.r === cell.r && state.anchor.c === cell.c) {
       clearSelection();
     } else {
@@ -860,7 +1086,6 @@ function createDataTable(options) {
     const cell = cellAt(e.target);
     if (!cell || (state.focus.r === cell.r && state.focus.c === cell.c)) return;
     state.focus = { r: cell.r, c: cell.c };
-    if (selectedCount() > 1) window.getSelection()?.removeAllRanges();
     paint();
   });
   document.addEventListener('mouseup', () => { state.dragging = false; });
@@ -880,7 +1105,6 @@ function createDataTable(options) {
       return;
     }
     if (mod && e.key.toLowerCase() === 'c') {
-      if (window.getSelection()?.toString()) return;  // let the browser copy a text selection
       e.preventDefault();
       copySelection();
       return;

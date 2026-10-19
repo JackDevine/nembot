@@ -5,328 +5,75 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nemsplainer</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚡</text></svg>">
+<link rel="stylesheet" href="/static/app.css">
 <script src="https://cdn.jsdelivr.net/npm/vega@6"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@6"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-embed@7"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@16/lib/marked.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-<style>
-  :root { --fg: #1f2328; --muted: #656d76; --border: #d0d7de; --bg: #f6f8fa; --accent: #0969da; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: var(--fg); display: flex; flex-direction: column; height: 100vh; }
-  header { padding: 10px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-  header h1 { font-size: 17px; margin: 0; }
-  #log { flex: 1; overflow-y: auto; padding: 20px; }
-  .turn { max-width: 900px; margin: 0 auto 18px; }
-  .user { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
-  .assistant > * { margin-top: 10px; }
-  .progress { color: var(--muted); font-style: italic; font-size: 14px; white-space: pre-wrap; }
-  .status { color: var(--muted); font-size: 13px; }
-  .error { color: #cf222e; }
-  details.fold { border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 13px; }
-  details.fold > summary { cursor: pointer; color: var(--muted); }
-  pre { background: var(--bg); padding: 8px; overflow-x: auto; font-size: 12px; }
-  table { border-collapse: collapse; font-size: 13px; width: 100%; }
-  th, td { border-bottom: 1px solid var(--border); padding: 3px 8px; text-align: left; white-space: nowrap; }
-  .tablewrap { overflow-x: auto; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .pager { font-size: 12px; color: var(--muted); display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-  form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); max-width: 940px; width: 100%; margin: 0 auto; }
-  textarea { flex: 1; font: inherit; padding: 8px; border: 1px solid var(--border); border-radius: 6px; resize: none; }
-  button { font: inherit; padding: 6px 14px; border: 1px solid var(--border); border-radius: 6px; background: white; cursor: pointer; }
-  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
-  .composer { position: relative; max-width: 940px; width: 100%; margin: 0 auto; }
-  #model-button { max-width: 230px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-  #picker { position: absolute; bottom: 100%; left: 20px; width: min(640px, calc(100vw - 40px)); max-height: 70vh; display: none; flex-direction: column;
-            background: white; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.12); z-index: 10; }
-  #picker.open { display: flex; }
-  #picker .help { font-size: 12px; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  #picker input { margin: 8px 12px; padding: 6px 8px; font: inherit; border: 1px solid var(--border); border-radius: 6px; }
-  #picker .list { overflow-y: auto; padding-bottom: 6px; }
-  #picker h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 8px 12px 4px; }
-  .model { display: flex; justify-content: space-between; gap: 8px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
-  .model:hover, .model.current { background: var(--bg); }
-  .model.disabled { opacity: .45; cursor: not-allowed; }
-  .model .meta { display: flex; gap: 4px; flex-shrink: 0; }
-  .badge { font-size: 11px; border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
-  .badge.image { border-color: #1a7f37; color: #1a7f37; }
-  .badge.textonly { border-color: #9a6700; color: #9a6700; }
-  .badge.notools { border-color: #cf222e; color: #cf222e; }
-  .via { font-size: 12px; color: var(--muted); }
-  .toggle { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); white-space: nowrap; cursor: pointer; }
-  .sources { font-size: 13px; color: var(--muted); }
-  .sources ol { margin: 4px 0 0; padding-left: 20px; }
-  .sources a { color: var(--accent); }
-</style>
 </head>
 <body>
-<header><h1>nemsplainer</h1><button id="reset" type="button">New chat</button></header>
-<main id="log"></main>
-<div class="composer">
-  <div id="picker">
-    <div class="help">
-      <b>Input types:</b> <span class="badge image">text + image</span> models can see the plots they make and comment on them.
-      <span class="badge textonly">text only</span> models still make plots for you but can't see them.
-      <span class="badge notools">no tools</span> models can't query the database, so they can't be used here.
-      You can switch models at any point in a chat.
-    </div>
-    <input id="model-search" type="search" placeholder="Search models…" autocomplete="off">
-    <div class="list" id="model-list"></div>
+<header>
+  <div class="brand">
+    <h1>nemsplainer</h1>
+    <nav>
+      <a href="#chat" data-view="chat">Chat</a>
+      <a href="#explorer" data-view="explorer">Explorer</a>
+    </nav>
   </div>
-  <form id="form">
-    <div>
-      <button type="button" id="model-button" title="Choose model">Loading models…</button>
-      <label class="toggle" title="Let the model search the web for context (billed per search)."><input type="checkbox" id="web-search"> Web search</label>
+  <button id="reset" type="button">New chat</button>
+</header>
+
+<section id="chat-view" class="view">
+  <main id="log"></main>
+  <div class="composer">
+    <div id="picker">
+      <div class="help">
+        <b>Input types:</b> <span class="badge image">text + image</span> models can see the plots they make and comment on them.
+        <span class="badge textonly">text only</span> models still make plots for you but can't see them.
+        <span class="badge notools">no tools</span> models can't query the database, so they can't be used here.
+        You can switch models at any point in a chat.
+      </div>
+      <input id="model-search" type="search" placeholder="Search models…" autocomplete="off">
+      <div class="list" id="model-list"></div>
     </div>
-    <textarea id="input" rows="2" placeholder="Ask about NEM prices, demand or generation…"></textarea>
-    <button class="primary" id="send">Send</button>
-  </form>
-</div>
+    <form id="form">
+      <div>
+        <button type="button" id="model-button" title="Choose model">Loading models…</button>
+        <label class="toggle" title="Let the model search the web for context (billed per search)."><input type="checkbox" id="web-search"> Web search</label>
+      </div>
+      <textarea id="input" rows="2" placeholder="Ask about NEM prices, demand or generation…"></textarea>
+      <button class="primary" id="send">Send</button>
+    </form>
+  </div>
+</section>
+
+<section id="explorer-view" class="view">
+  <aside id="catalog">
+    <div id="catalog-source" class="source-line"></div>
+    <input id="table-search" type="search" placeholder="Search tables…" autocomplete="off">
+    <label class="toggle"><input type="checkbox" id="downloaded-only"> Downloaded only</label>
+    <div id="package-list"></div>
+  </aside>
+  <main id="table-view"><p class="empty">Choose a table on the left.</p></main>
+  <div id="tooltip" role="tooltip"></div>
+</section>
+
+<script src="/static/common.js"></script>
+<script src="/static/chat.js"></script>
+<script src="/static/explorer.js"></script>
 <script>
-const log = document.getElementById('log');
-const form = document.getElementById('form');
-const input = document.getElementById('input');
-const send = document.getElementById('send');
-let conversation = crypto.randomUUID();
-
-// TODO: replace this toggle once there's a UI for choosing which tools are available.
-const webSearch = document.getElementById('web-search');
-webSearch.checked = localStorage.getItem('webSearch') !== 'off';
-webSearch.onchange = () => localStorage.setItem('webSearch', webSearch.checked ? 'on' : 'off');
-
-// ---- Model picker ----
-const picker = document.getElementById('picker');
-const modelButton = document.getElementById('model-button');
-const modelSearch = document.getElementById('model-search');
-const modelList = document.getElementById('model-list');
-let models = [];
-let currentModel = null;
-
-function modelBadges(m) {
-  const meta = el('span', 'meta');
-  meta.append(m.vision ? el('span', 'badge image', 'text + image') : el('span', 'badge textonly', 'text only'));
-  if (!m.tools) meta.append(el('span', 'badge notools', 'no tools'));
-  if (m.price_in !== null && m.price_out !== null) meta.append(el('span', 'badge', `$${m.price_in}/$${m.price_out} per M`));
-  return meta;
+// Hash routing: #chat, #explorer, #explorer/<TABLE>.
+function route() {
+  const [view, ...rest] = (location.hash.slice(1) || 'chat').split('/');
+  const name = ['chat', 'explorer'].includes(view) ? view : 'chat';
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `${name}-view`));
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === name));
+  document.getElementById('reset').style.visibility = name === 'chat' ? 'visible' : 'hidden';
+  if (name === 'explorer') showExplorer(rest.join('/') || null);
 }
-
-function setModel(m) {
-  currentModel = m;
-  localStorage.setItem('model', m.ref);
-  modelButton.textContent = `${m.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${m.name}`;
-  modelButton.title = `${m.ref} — ${m.vision ? 'text + image input' : 'text-only input: cannot see plots'}`;
-}
-
-function drawModels() {
-  const query = modelSearch.value.trim().toLowerCase();
-  modelList.replaceChildren();
-  for (const [provider, title] of [['claude', 'Claude (Anthropic API)'], ['openrouter', 'OpenRouter']]) {
-    const group = models.filter(m => m.provider === provider &&
-      (!query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query)));
-    if (!group.length) continue;
-    modelList.append(el('h3', '', `${title} · ${group.length}`));
-    for (const m of group) {
-      const usable = m.tools && m.available;
-      const row = el('div', 'model' + (usable ? '' : ' disabled') + (currentModel && m.ref === currentModel.ref ? ' current' : ''));
-      row.title = !m.available ? 'Provider credentials are not configured (OPENROUTER_API_KEY).'
-        : !m.tools ? 'This model does not support tool calling, so it cannot query the database.' : m.id;
-      row.append(el('span', '', m.name), modelBadges(m));
-      if (usable) row.onclick = () => { setModel(m); picker.classList.remove('open'); input.focus(); };
-      modelList.append(row);
-    }
-  }
-}
-
-async function loadModels() {
-  const response = await fetch('/api/models');
-  const body = await response.json();
-  models = body.models;
-  body.errors.forEach(message => console.warn(message));
-  const saved = models.find(m => m.ref === localStorage.getItem('model') && m.tools && m.available);
-  const fallback = models.find(m => m.ref === body.default) || { ref: body.default, provider: 'claude', name: 'Claude Opus 5.5', vision: true };
-  setModel(saved || fallback);
-}
-
-modelButton.onclick = () => {
-  picker.classList.toggle('open');
-  if (picker.classList.contains('open')) { modelSearch.value = ''; drawModels(); modelSearch.focus(); }
-};
-modelSearch.oninput = drawModels;
-document.addEventListener('click', e => {
-  if (!picker.contains(e.target) && e.target !== modelButton) picker.classList.remove('open');
-});
-document.addEventListener('keydown', e => { if (e.key === 'Escape') picker.classList.remove('open'); });
-loadModels().catch(err => { modelButton.textContent = 'Models unavailable'; console.error(err); });
-
-document.getElementById('reset').onclick = () => {
-  conversation = crypto.randomUUID();
-  log.replaceChildren();
-};
-input.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
-});
-
-function el(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function details(title, body) {
-  const d = el('details', 'fold');
-  d.append(el('summary', '', title), body);
-  return d;
-}
-
-function sqlBlock(title, sql) { return details(title, el('pre', '', sql)); }
-
-// Models write "~$370/MWh" for approximations; GFM would read paired single
-// tildes as strikethrough, so keep strikethrough to the explicit ~~ form.
-function renderMarkdown(text) {
-  return DOMPurify.sanitize(marked.parse(text.replace(/(^|[^~\\])~(?!~)/g, '$1\\~')));
-}
-
-function formatCell(v) {
-  if (v === null) return '';
-  if (typeof v === 'number' && !Number.isInteger(v)) return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  return String(v);
-}
-
-function renderTable(event) {
-  const wrap = el('div');
-  wrap.append(sqlBlock('SQL query', event.sql));
-  const tableWrap = el('div', 'tablewrap');
-  const pager = el('div', 'pager');
-  wrap.append(tableWrap, pager);
-  const pageSize = 10;
-  const pages = Math.max(1, Math.ceil(event.rows.length / pageSize));
-  let page = 0;
-  function draw() {
-    const table = el('table');
-    const head = el('tr');
-    event.columns.forEach(c => head.append(el('th', '', c)));
-    table.append(head);
-    event.rows.slice(page * pageSize, (page + 1) * pageSize).forEach(row => {
-      const tr = el('tr');
-      row.forEach(v => tr.append(el('td', typeof v === 'number' ? 'num' : '', formatCell(v))));
-      table.append(tr);
-    });
-    tableWrap.replaceChildren(table);
-    const prev = el('button', '', '‹'), next = el('button', '', '›');
-    prev.disabled = page === 0; next.disabled = page >= pages - 1;
-    prev.onclick = () => { page--; draw(); };
-    next.onclick = () => { page++; draw(); };
-    const shown = event.total > event.rows.length ? ` (first ${event.rows.length} of ${event.total} rows)` : ` (${event.total} rows)`;
-    pager.replaceChildren(prev, el('span', '', `Page ${page + 1} of ${pages}${shown}`), next);
-  }
-  draw();
-  return wrap;
-}
-
-function renderPlot(event) {
-  const wrap = el('div');
-  const spec = el('div');
-  spec.append(el('p', '', 'Data is supplied by the plot SQL above.'), el('pre', '', JSON.stringify(event.plot_spec, null, 2)));
-  wrap.append(sqlBlock('Plot SQL', event.sql), details('Plot specification', spec));
-  const target = el('div');
-  wrap.append(target);
-  vegaEmbed(target, event.spec, { actions: { export: true, source: false, compiled: false, editor: false } })
-    .catch(err => target.append(el('div', 'error', `Plot failed to render: ${err}`)));
-  return wrap;
-}
-
-async function ask(text) {
-  const turn = el('div', 'turn');
-  const reply = el('div', 'assistant');
-  turn.append(el('div', 'user', text), reply);
-  log.append(turn);
-  const status = el('div', 'status', 'Thinking…');
-  reply.append(status);
-  let segment = null, markdown = '';
-  const scroll = () => { log.scrollTop = log.scrollHeight; };
-  const place = node => { reply.insertBefore(node, status); scroll(); };
-
-  function handle(event) {
-    switch (event.type) {
-      case 'block': segment = null; break;
-      case 'text':
-        if (!segment || segment.className !== 'text') { segment = el('div', 'text'); markdown = ''; place(segment); }
-        markdown += event.delta;
-        segment.innerHTML = renderMarkdown(markdown);
-        scroll();
-        break;
-      case 'progress':
-        if (!segment || segment.className !== 'progress') { segment = el('div', 'progress'); place(segment); }
-        segment.textContent += event.delta;
-        break;
-      case 'model':
-        reply.prepend(el('div', 'via', `${event.model.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${event.model.name}`));
-        break;
-      case 'tool':
-      case 'tool_running':
-        segment = null;
-        status.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
-          web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
-        break;
-      case 'plot': segment = null; place(renderPlot(event)); break;
-      case 'sources': {
-        segment = null;
-        const box = el('div', 'sources', event.kind === 'cited' ? 'Sources' : 'Web pages consulted');
-        const list = el('ol');
-        for (const source of event.sources) {
-          const a = el('a', '', source.title);
-          a.href = source.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
-          const li = el('li'); li.append(a); list.append(li);
-        }
-        box.append(list); place(box);
-        break;
-      }
-      case 'table': segment = null; place(renderTable(event)); break;
-      case 'notice': status.textContent = event.message; break;
-      case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
-    }
-  }
-
-  try {
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, message: text, model: currentModel && currentModel.ref, web_search: webSearch.checked }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error || `HTTP ${response.status}`);
-    }
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += value;
-      let cut;
-      while ((cut = buffer.indexOf('\n\n')) >= 0) {
-        const line = buffer.slice(0, cut);
-        buffer = buffer.slice(cut + 2);
-        if (line.startsWith('data: ')) handle(JSON.parse(line.slice(6)));
-      }
-    }
-  } catch (err) {
-    handle({ type: 'error', message: err.message });
-  } finally {
-    status.remove();
-  }
-}
-
-form.addEventListener('submit', async e => {
-  e.preventDefault();
-  const text = input.value.trim();
-  if (!text || send.disabled) return;
-  input.value = '';
-  send.disabled = true;
-  try { await ask(text); } finally { send.disabled = false; input.focus(); }
-});
+window.addEventListener('hashchange', route);
+route();
 </script>
 </body>
 </html>

@@ -38,6 +38,8 @@ Three pieces share the DuckDB file `data/nem.duckdb` (`data/` and `__marimo__/` 
    - Web search (UI toggle, default on) adds Anthropic's server-side `web_search`/`web_fetch` tools (`_20260209` dynamic-filtering versions where supported, gated in `claude.web_tools()`) or OpenRouter's `openrouter:web_search` server tool. Neither runs in our tool loop. Sources are emitted as a `sources` event: Claude citations, or the consulted pages when dynamic filtering leaves the text uncited.
    - `models.py` — the model catalogue (Anthropic models API + public OpenRouter `/models`, cached for an hour). Model refs are `claude:<id>` / `openrouter:<id>`.
    - `web.py` (Starlette) streams UI events as SSE to `static/index.html` (vega-embed, marked, DOMPurify from CDN). Conversations live in memory keyed by a browser-generated id. OpenRouter needs `OPENROUTER_API_KEY`.
+   - `explorer.py` — the read-only explorer API: overview (catalogue tables in the monthly archive, marked downloaded or not), table details (docs, row count, time-column range, `_nemsplainer.files` download history, filter options) and paged rows. Column names in SQL only ever come from the catalogue; filter values are always parameters. `catalog.time_column()`/`kind()` classify tables as interval, effective-dated or reference.
+   - Front end: `static/index.html` is a shell with hash routing (`#chat`, `#explorer/<TABLE>`). The code lives in classic scripts that share globals: `common.js` (helpers), `chat.js`, `explorer.js`, and `app.css`.
    - The system prompt and tool behaviour are duplicated from `load_mms.py`; keep them in sync if one changes.
 
 ## Tests

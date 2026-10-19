@@ -7,7 +7,7 @@
   "index_url": "https://di-help.docs.public.aemo.com.au/Content/Data_Model/MMS_Data_Model.htm",
   "format": "pdf",
   "pages": 1146,
-  "built": "2026-10-19T18:56:54+11:00"
+  "built": "2026-10-19T19:03:22+11:00"
  },
  "archive": {
   "month": "2026-09",
@@ -18208,12 +18208,7 @@
        "3",
        "4",
        "MPC or MPF binding (ROP was outside of MPC/MPF)"
-      ]
-     ]
-    },
-    {
-     "type": "table",
-     "rows": [
+      ],
       [
        "2",
        "2",

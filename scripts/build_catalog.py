@@ -142,8 +142,12 @@ class Parser:
                                               'type': duckdb_type(kind), 'mandatory': mandatory.upper() == 'X',
                                               'comment': comment})
         elif self.section == 'description':
-            cleaned = [[c for c in row if c] for row in rows]
-            self.table['description'].append({'type': 'table', 'rows': [r for r in cleaned if r]})
+            cleaned = [r for r in ([c for c in row if c] for row in rows) if r]
+            blocks = self.table['description']
+            if blocks and blocks[-1]['type'] == 'table' and cleaned and len(cleaned[0]) == len(blocks[-1]['rows'][-1]):
+                blocks[-1]['rows'] += cleaned  # the same table, continued after a page break
+            elif cleaned:
+                blocks.append({'type': 'table', 'rows': cleaned})
             self.last_top = None
 
 

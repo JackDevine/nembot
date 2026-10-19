@@ -58,6 +58,15 @@ model search the web for context (billed per search); sources are listed under
 the reply. Flags: `--database`, `--host`,
 `--port`.
 
+## Explorer
+
+The **Explorer** tab lists every table published in the MMSDM monthly archive,
+grouped by package, using documentation parsed from AEMO's Electricity Data
+Model Report (the version and a link to the PDF are shown). Tables you haven't
+downloaded are faded. Open a table to see its description, keys and column
+docs (hover over a column header), its row count and date range, when it was
+downloaded, and a filterable, paged view of the data.
+
 ## Behavior
 
 - Data is appended cumulatively; reruns of the same window are idempotent.

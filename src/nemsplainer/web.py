@@ -1,5 +1,6 @@
 """Localhost web chat over the MMS database, backed by Claude or OpenRouter models."""
 import argparse
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -10,9 +11,11 @@ import openai
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 import uvicorn
 
+from . import explorer
 from .chat import Conversation, run_turn
 from .claude import ClaudeProvider
 from .models import DEFAULT_MODEL, Catalog, public
@@ -81,10 +84,32 @@ def create_app(database: str) -> Starlette:
         return StreamingResponse(events(), media_type='text/event-stream',
                                  headers={'Cache-Control': 'no-cache'})
 
+    async def explorer_overview(request: Request):
+        return JSONResponse(await asyncio.to_thread(explorer.overview, db))
+
+    async def explorer_table(request: Request):
+        result = await asyncio.to_thread(explorer.table, db, request.path_params['name'].upper())
+        return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
+
+    async def explorer_rows(request: Request):
+        query = request.query_params
+        try:
+            options = dict(offset=int(query.get('offset', 0)), limit=int(query.get('limit', 25)),
+                           start=explorer.parse_date(query.get('start')), end=explorer.parse_date(query.get('end')),
+                           values={k: query[k] for k in explorer.FILTER_COLUMNS if query.get(k)})
+        except ValueError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+        result = await asyncio.to_thread(explorer.rows, db, request.path_params['name'].upper(), **options)
+        return JSONResponse(result) if result else JSONResponse({'error': 'unknown table'}, status_code=404)
+
     return Starlette(routes=[
         Route('/', index),
         Route('/api/models', models),
         Route('/api/chat', chat, methods=['POST']),
+        Route('/api/explorer', explorer_overview),
+        Route('/api/explorer/tables/{name}', explorer_table),
+        Route('/api/explorer/tables/{name}/rows', explorer_rows),
+        Mount('/static', StaticFiles(directory=STATIC), name='static'),
     ])
 
 

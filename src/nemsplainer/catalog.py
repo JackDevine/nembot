@@ -41,3 +41,22 @@ def tables() -> dict[str, dict]:
 
 def source() -> dict:
     return load()['source']
+
+
+# Timestamp keys that mark when a reference row takes effect, rather than an interval.
+_EFFECTIVE = {'EFFECTIVEDATE', 'VALIDFROM', 'START_DATE', 'STARTDATE', 'EFFECTIVE_END_DATETIME'}
+
+
+def time_column(name: str) -> str | None:
+    """The table's main timestamp: its first TIMESTAMP primary-key column (not LASTCHANGED)."""
+    entry = tables()[name]
+    types = {c['name']: c['type'] for c in entry['columns']}
+    return next((k for k in entry['primary_key'] if types.get(k) == 'TIMESTAMP' and k != 'LASTCHANGED'), None)
+
+
+def kind(name: str) -> str:
+    """'interval' (time series), 'effective' (effective-dated reference) or 'reference'."""
+    column = time_column(name)
+    if column is None:
+        return 'reference'
+    return 'effective' if column in _EFFECTIVE else 'interval'

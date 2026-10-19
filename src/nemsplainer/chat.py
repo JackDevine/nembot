@@ -1,4 +1,14 @@
-"""Claude-backed NEM analyst: DuckDB query/plot tools and a streaming agent loop."""
+"""Provider-neutral NEM analyst: prompt, DuckDB tools, history and the turn loop.
+
+History is stored in a neutral format so a conversation can switch freely
+between models and providers. Each provider module renders it into its own
+wire format and streams back UI events plus one assistant turn:
+
+- ``{'role': 'user', 'text': str}``
+- ``{'role': 'assistant', 'model': ref, 'model_name': str, 'text': str, 'tool_calls': [{'id', 'name', 'input'}],
+  'raw': {provider: provider-specific replay data}, 'stop': 'end' | 'tool_use' | 'pause'}``
+- ``{'role': 'tool', 'results': [{'id', 'name', 'text', 'image': base64 PNG | None, 'is_error': bool}]}``
+"""
 import asyncio
 import base64
 import csv
@@ -10,26 +20,46 @@ import json
 from typing import AsyncIterator
 
 import altair
-import anthropic
 import duckdb
 import vl_convert
 
-MODEL = 'claude-opus-5-5'
-TABLE_ROWS = 200
+from .models import ModelInfo
 
-SYSTEM_PROMPT = """You are a data analyst for Australia's National Electricity Market (NEM).
+TABLE_ROWS = 200
+MAX_ROUNDS = 25
+NO_VISION_BLURB = ('I am unable to visually sense-check or comment on the results of this visualization. '
+                   'For that, you will need a model that can read images.')
+
+_PROMPT_HEAD = """You are a data analyst for Australia's National Electricity Market (NEM).
 
 You have two tools that execute DuckDB SQL against the `nem` database:
 - `query_mms(sql)` returns a short CSV preview and displays a table to the user.
-- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
+"""
+
+_VISION_TOOLS = """- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
   (omit data/datasets), plots ALL query rows, and returns a PNG for you to inspect.
   Use it when asked for a plot/chart, or when a visual comparison or trend helps.
   Use explicit encoding types and fields matching SQL aliases; label axes and units.
   Inspect the returned image before commenting; never claim to see a failed plot.
-  Interactive plots are displayed automatically as soon as the tool finishes,
+"""
+
+_NO_VISION_TOOLS = f"""- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
+  (omit data/datasets) and plots ALL query rows for the user.
+  Use it when asked for a plot/chart, or when a visual comparison or trend helps.
+  Use explicit encoding types and fields matching SQL aliases; label axes and units.
+  You cannot see images, so you never see the plots you make. Do not describe or
+  comment on a plot's visual content; base any insight only on the CSV preview.
+  Whenever you produce a plot, include this sentence verbatim in your reply:
+  "{NO_VISION_BLURB}"
+"""
+
+_PROMPT_TAIL = """  Interactive plots are displayed automatically as soon as the tool finishes,
   before your interpretation; do not duplicate them in your written response.
   Do not emit image links, HTML, or Vega-Lite JSON in your final answer.
 ALWAYS call at least one of these tools before answering factual market questions.
+The user can switch models mid-conversation. Earlier assistant turns that start with
+"[Earlier reply by <model>]" were written by that other model, not by you: build on or
+correct them as needed, but don't apologise for them as your own.
 
 Data coverage:
 - This database intentionally contains only a short date range. This is expected,
@@ -65,6 +95,17 @@ SQL style rules:
 - After receiving tool output, reply with a concise 1-2 sentence insight about the data.
 - Prices are fine to write as usual, e.g. $52.30/MWh."""
 
+
+def system_prompt(vision: bool) -> str:
+    return _PROMPT_HEAD + (_VISION_TOOLS if vision else _NO_VISION_TOOLS) + _PROMPT_TAIL
+
+
+VISION_PLOT_NOTE = ('Inspect this plot of the SQL result and describe its key patterns. '
+                    'The interactive Vega-Lite plot is displayed when this tool completes.')
+NO_VISION_PLOT_NOTE = ('The interactive plot is now displayed to the user. You cannot see it: do not describe '
+                       f'its visual content, and include this sentence in your reply: "{NO_VISION_BLURB}"')
+
+# Tool definitions in Anthropic's shape; providers convert as needed.
 TOOLS = [
     {
         'name': 'query_mms',
@@ -73,7 +114,6 @@ TOOLS = [
             '10-row CSV preview; the user sees the full query result in a table. '
             'Prefer aggregate queries; do not pivot to fit the preview.'
         ),
-        'eager_input_streaming': True,
         'input_schema': {
             'type': 'object',
             'properties': {
@@ -85,12 +125,11 @@ TOOLS = [
     {
         'name': 'visualize_mms',
         'description': (
-            'Query MMS and create a Vega-Lite plot for you and the user. You receive a PNG '
-            'of the full plot and a short CSV preview, so inspect the image before '
-            'commenting. The interactive plot is automatically displayed as soon as this '
-            'tool finishes; do not embed it yourself.'
+            'Query MMS and create a Vega-Lite plot for the user from all result rows. Returns a '
+            'short CSV preview (and, for models that can read images, a PNG of the plot). The '
+            'interactive plot is automatically displayed as soon as this tool finishes; do not '
+            'embed it yourself.'
         ),
-        'eager_input_streaming': True,
         'input_schema': {
             'type': 'object',
             'properties': {
@@ -117,6 +156,7 @@ TOOLS = [
         },
     },
 ]
+REQUIRED_INPUTS = {tool['name']: tuple(tool['input_schema']['required']) for tool in TOOLS}
 
 
 @dataclass
@@ -161,7 +201,7 @@ def run_query(db: duckdb.DuckDBPyConnection, sql: str) -> Result | str:
         cursor.close()
 
 
-def _prepare_spec(plot_spec: str) -> dict:
+def prepare_spec(plot_spec: str) -> dict:
     spec = json.loads(plot_spec)
     if not isinstance(spec, dict):
         raise ValueError('plot_spec must be a JSON object')
@@ -193,147 +233,122 @@ def _prepare_spec(plot_spec: str) -> dict:
     return spec
 
 
-def query_tool(db, sql: str) -> tuple[str, list[dict]]:
-    """Run query_mms, returning (tool_result content, UI events)."""
-    result = run_query(db, sql)
-    if isinstance(result, str):
-        return result, []
-    return _preview(result), [_table_event(result)]
-
-
-def visualize_tool(db, sql: str, plot_spec: str) -> tuple[str | list[dict], list[dict]]:
-    """Run visualize_mms, returning (tool_result content, UI events)."""
-    try:
-        spec = _prepare_spec(plot_spec)
-    except Exception as err:
-        return f"Invalid plot specification: {getattr(err, 'message', str(err))}", []
-    result = run_query(db, sql)
-    if isinstance(result, str):
-        return result, []
-    if not result.rows:
-        return 'The query returned no rows. Adjust the SQL before plotting.', [_table_event(result)]
-    try:
-        full = altair.Chart.from_dict({**spec, 'data': {'values': _records(result)}}, validate=True).to_dict()
-        png = vl_convert.vegalite_to_png(full, scale=1)
-    except Exception as err:
-        return f'Plot rendering failed: {err}. Revise the specification and retry.', []
-    content = [
-        {'type': 'text', 'text': f'Plot created from all {len(result.rows)} rows. First 10 rows:\n{_preview(result)}'},
-        {'type': 'text', 'text': 'Inspect this plot of the SQL result and describe its key patterns. '
-                                 'The interactive Vega-Lite plot is displayed when this tool completes.'},
-        {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png',
-                                     'data': base64.standard_b64encode(png).decode()}},
-    ]
-    return content, [{'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': spec}, _table_event(result)]
-
-
-def _table_event(result: Result) -> dict:
+def table_event(result: Result) -> dict:
     return {
         'type': 'table', 'sql': result.sql, 'columns': result.columns, 'total': len(result.rows),
         'rows': [[_jsonable(v) for v in row] for row in result.rows[:TABLE_ROWS]],
     }
 
 
-def _valid_input(name: str, args) -> bool:
-    # Eager input streaming skips server-side validation, so check before running.
-    required = {'query_mms': ('sql',), 'visualize_mms': ('sql', 'plot_spec')}.get(name)
+def query_tool(db, sql: str) -> tuple[str, str | None, list[dict]]:
+    """Run query_mms, returning (result text, PNG base64, UI events)."""
+    result = run_query(db, sql)
+    if isinstance(result, str):
+        return result, None, []
+    return _preview(result), None, [table_event(result)]
+
+
+def visualize_tool(db, sql: str, plot_spec: str) -> tuple[str, str | None, list[dict]]:
+    """Run visualize_mms, returning (result text, PNG base64, UI events).
+
+    The PNG is always rendered and stored; providers only send it to models
+    that can read images.
+    """
+    try:
+        spec = prepare_spec(plot_spec)
+    except Exception as err:
+        return f"Invalid plot specification: {getattr(err, 'message', str(err))}", None, []
+    result = run_query(db, sql)
+    if isinstance(result, str):
+        return result, None, []
+    if not result.rows:
+        return 'The query returned no rows. Adjust the SQL before plotting.', None, [table_event(result)]
+    try:
+        full = altair.Chart.from_dict({**spec, 'data': {'values': _records(result)}}, validate=True).to_dict()
+        png = vl_convert.vegalite_to_png(full, scale=1)
+    except Exception as err:
+        return f'Plot rendering failed: {err}. Revise the specification and retry.', None, []
+    text = f'Plot created from all {len(result.rows)} rows. First 10 rows:\n{_preview(result)}'
+    events = [{'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': spec}, table_event(result)]
+    return text, base64.standard_b64encode(png).decode(), events
+
+
+def earlier_reply_label(entry: dict, model: ModelInfo) -> str:
+    """Prefix for assistant turns written by a different model than ``model``."""
+    if entry['model'] == model.ref:
+        return ''
+    return f"[Earlier reply by {entry.get('model_name') or entry['model']}]"
+
+
+def valid_input(name: str, args) -> bool:
+    # Inputs may arrive unvalidated (eager streaming, OpenAI-style JSON strings).
+    required = REQUIRED_INPUTS.get(name)
     return required is not None and isinstance(args, dict) and all(isinstance(args.get(k), str) for k in required)
 
 
-def _echoable(content: list) -> list:
-    """Drop pre-fallback thinking/tool_use blocks, which must not be echoed back."""
-    boundary = max((i for i, b in enumerate(content) if b.type == 'fallback'), default=-1)
-    dropped = {'thinking', 'redacted_thinking', 'tool_use'}
-    return [b for i, b in enumerate(content) if i > boundary or b.type not in dropped]
+async def execute_tool(db, call: dict) -> tuple[dict, list[dict]]:
+    """Run one tool call, returning its neutral result and UI events."""
+    name, args = call['name'], call['input']
+    result = {'id': call['id'], 'name': name, 'image': None, 'is_error': False}
+    if not valid_input(name, args):
+        result.update(text=json.dumps({'INVALID_JSON': json.dumps(args)}), is_error=True)
+        return result, []
+    if name == 'query_mms':
+        text, image, events = await asyncio.to_thread(query_tool, db, args['sql'])
+    else:
+        text, image, events = await asyncio.to_thread(visualize_tool, db, args['sql'], args['plot_spec'])
+    result.update(text=text, image=image)
+    return result, events
 
 
 @dataclass
 class Conversation:
-    messages: list = field(default_factory=list)
+    history: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-async def run_turn(client: anthropic.AsyncAnthropic, db, conversation: Conversation, text: str) -> AsyncIterator[dict]:
-    """Stream UI events for one user turn, running tools until Claude finishes.
+async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo) -> AsyncIterator[dict]:
+    """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
     table is shown, at the end of the turn, as in the marimo notebook.
     """
-    messages = conversation.messages
-    start = len(messages)
-    messages.append({'role': 'user', 'content': text})
+    provider = providers[model.provider]
+    history = conversation.history
+    start = len(history)
+    history.append({'role': 'user', 'text': text})
     latest_table = None
-    json_retries = 0
     try:
-        while True:
-            try:
-                async with client.beta.messages.stream(
-                    model=MODEL,
-                    max_tokens=64000,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOLS,
-                    messages=messages,
-                    thinking={'type': 'adaptive', 'display': 'updates'},
-                    output_config={'effort': 'medium'},
-                    cache_control={'type': 'ephemeral'},
-                    fallbacks='default',
-                    betas=['server-side-fallback-2026-07-01', 'thinking-display-updates-2026-08-18'],
-                ) as stream:
-                    async for event in stream:
-                        if event.type == 'content_block_start':
-                            kind = event.content_block.type
-                            if kind == 'tool_use':
-                                yield {'type': 'tool', 'name': event.content_block.name}
-                            elif kind in ('text', 'thinking'):
-                                yield {'type': 'block', 'kind': kind}
-                        elif event.type == 'content_block_delta':
-                            if event.delta.type == 'text_delta':
-                                yield {'type': 'text', 'delta': event.delta.text}
-                            elif event.delta.type == 'thinking_delta':
-                                yield {'type': 'progress', 'delta': event.delta.thinking}
-                    response = await stream.get_final_message()
-                json_retries = 0
-            except ValueError:
-                # Tool input JSON the SDK could not parse at all; re-issue the turn.
-                json_retries += 1
-                if json_retries > 2:
-                    raise
-                yield {'type': 'notice', 'message': 'Retrying after malformed tool input…'}
-                continue
-
-            if response.stop_reason == 'refusal':
-                yield {'type': 'error', 'message': 'The model declined this request.'}
-                return
-            content = _echoable(response.content)
-            messages.append({'role': 'assistant', 'content': content})
-            if response.stop_reason == 'pause_turn':
-                continue
-            tool_uses = [b for b in content if b.type == 'tool_use']
-            if not tool_uses:
-                break
-            if response.stop_reason == 'max_tokens':
-                raise RuntimeError('Tool input was truncated by max_tokens.')
-
-            results = []
-            for block in tool_uses:  # sequential: tools share the DuckDB connection
-                if not _valid_input(block.name, block.input):
-                    results.append({'type': 'tool_result', 'tool_use_id': block.id, 'is_error': True,
-                                    'content': json.dumps({'INVALID_JSON': json.dumps(block.input)})})
-                    continue
-                if block.name == 'query_mms':
-                    output, events = await asyncio.to_thread(query_tool, db, block.input['sql'])
+        for _ in range(MAX_ROUNDS):
+            turn = None
+            async for item in provider.respond(model, history):
+                if item.get('role') == 'assistant':
+                    turn = item
                 else:
-                    output, events = await asyncio.to_thread(visualize_tool, db, block.input['sql'], block.input['plot_spec'])
-                for ui_event in events:
-                    if ui_event['type'] == 'table':
-                        latest_table = ui_event
+                    yield item
+            if turn is None:  # refused; the provider already reported it
+                return
+            history.append(turn)
+            if turn['stop'] == 'pause':
+                continue
+            if not turn['tool_calls']:
+                break
+            results = []
+            for call in turn['tool_calls']:  # sequential: tools share the DuckDB connection
+                yield {'type': 'tool_running', 'name': call['name']}
+                result, events = await execute_tool(db, call)
+                for event in events:
+                    if event['type'] == 'table':
+                        latest_table = event
                     else:
-                        yield ui_event
-                results.append({'type': 'tool_result', 'tool_use_id': block.id, 'content': output})
-            messages.append({'role': 'user', 'content': results})
+                        yield event
+                results.append(result)
+            history.append({'role': 'tool', 'results': results})
+        else:
+            yield {'type': 'error', 'message': f'Stopped after {MAX_ROUNDS} tool rounds.'}
     except BaseException:
-        # Leave history ending on a complete turn (no tool_use without its result).
-        del messages[start:]
+        # Leave history ending on a complete turn (no tool call without its result).
+        del history[start:]
         raise
     if latest_table is not None:
         yield latest_table

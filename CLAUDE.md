@@ -30,11 +30,16 @@ Three pieces share the DuckDB file `data/nem.duckdb` (`data/` and `__marimo__/` 
 
 2. **`load_mms.py` — a marimo notebook** (despite the name, it does not load data). It opens the DB `read_only=True` and runs a pydantic-ai agent (via OpenRouter, `OPENROUTER_API_KEY`) inside `mo.ui.chat`, exposing two tools: `query_mms(sql)` and `visualize_mms(sql, plot_spec)` (Vega-Lite validated with Altair before running SQL, rendered to PNG for the model). The `SYSTEM_PROMPT` cell defines agent behavior.
 
-3. **`chat.py` + `web.py` + `static/index.html` — the web chat** (`nemsplainer-chat`), a port of the notebook to the Anthropic API. `chat.py` holds the system prompt, tool schemas and a manual streaming tool loop (`run_turn`) on `claude-opus-5-5` (adaptive thinking with `display: "updates"`, effort `medium`, `fallbacks: "default"` — both via beta headers — and auto prompt caching); it yields UI events (`text`, `progress`, `tool`, `plot`, `table`, `error`) that `web.py` (Starlette) sends as SSE to a single-page frontend (vega-embed, marked, DOMPurify from CDN). Conversations live in memory keyed by a browser-generated id; a turn that fails midway is rolled back so history never ends on an unanswered `tool_use`. The system prompt and tool behavior are duplicated from `load_mms.py` — keep them in sync if one changes.
+3. **The web chat** (`nemsplainer-chat`): a port of the notebook that can use any Claude model directly or any tool-capable OpenRouter model, switching freely mid-conversation.
+   - `chat.py` — the provider-neutral core: system prompt (vision and text-only variants), tool schemas, DuckDB tool execution, and `run_turn` (the tool loop, sequential tool calls, rollback of a failed turn). History is stored in a **neutral format** (documented at the top of the file); plot PNGs are always stored and only sent to models that can read images.
+   - `claude.py` / `openrouter.py` — each provider renders neutral history into its wire format and streams one assistant turn. Rendering must stay **deterministic per (history, current model)** so turns replay byte-identically (prompt caching, and Claude's preserved-thinking check). Same-model turns replay provider raw data (Claude content blocks with thinking; OpenRouter `reasoning_details`); turns from other models are rendered from neutral fields and prefixed `[Earlier reply by …]`. Claude per-model request features (adaptive thinking, `display: "updates"`, effort, `fallbacks: "default"`) are gated by `request_options()`.
+   - `models.py` — the model catalogue (Anthropic models API + public OpenRouter `/models`, cached for an hour). Model refs are `claude:<id>` / `openrouter:<id>`.
+   - `web.py` (Starlette) streams UI events as SSE to `static/index.html` (vega-embed, marked, DOMPurify from CDN). Conversations live in memory keyed by a browser-generated id. OpenRouter needs `OPENROUTER_API_KEY`.
+   - The system prompt and tool behaviour are duplicated from `load_mms.py`; keep them in sync if one changes.
 
 ## Tests
 
-Tests run against real DuckDB in temp dirs with the network faked by patching `urllib.request.urlopen` to an in-memory NEMWEB server (`tests/test_ingest.py`: `MonthlyArchive` builds synthetic MMS ZIPs and listings). No test hits the real network.
+`tests/test_chat.py` covers history rendering and the turn loop with a fake provider (no network). Loader tests run against real DuckDB in temp dirs with the network faked by patching `urllib.request.urlopen` to an in-memory NEMWEB server (`tests/test_ingest.py`: `MonthlyArchive` builds synthetic MMS ZIPs and listings). No test hits the real network.
 
 ## Reference
 

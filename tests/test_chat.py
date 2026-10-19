@@ -1,0 +1,141 @@
+"""Provider-neutral chat history, rendering and the turn loop (no network)."""
+import asyncio
+import tempfile
+import unittest
+from pathlib import Path
+
+import duckdb
+
+from nemsplainer import claude, openrouter
+from nemsplainer.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt
+from nemsplainer.models import ModelInfo
+
+OPUS = ModelInfo('claude:claude-opus-5-5', 'claude', 'claude-opus-5-5', 'Claude Opus 5.5', True, True, True)
+GLM = ModelInfo('openrouter:z-ai/glm', 'openrouter', 'z-ai/glm', 'GLM', True, True, True)
+TEXT = ModelInfo('openrouter:x/text', 'openrouter', 'x/text', 'Text Only', False, True, True)
+
+HISTORY = [
+    {'role': 'user', 'text': 'plot prices'},
+    {'role': 'assistant', 'model': OPUS.ref, 'model_name': OPUS.name, 'text': 'Plotting.',
+     'tool_calls': [{'id': 'toolu_1', 'name': 'visualize_mms', 'input': {'sql': 'SELECT 1', 'plot_spec': '{}'}}],
+     'raw': {'claude': [{'type': 'thinking', 'thinking': '', 'signature': 'sig'},
+                        {'type': 'text', 'text': 'Plotting.'},
+                        {'type': 'tool_use', 'id': 'toolu_1', 'name': 'visualize_mms',
+                         'input': {'sql': 'SELECT 1', 'plot_spec': '{}'}}]},
+     'stop': 'tool_use'},
+    {'role': 'tool', 'results': [{'id': 'toolu_1', 'name': 'visualize_mms', 'text': 'Plot created',
+                                  'image': 'iVBORw0KGgo=', 'is_error': False}]},
+    {'role': 'assistant', 'model': GLM.ref, 'model_name': GLM.name, 'text': 'Prices rose.', 'tool_calls': [],
+     'raw': {'openrouter': {'reasoning_details': [{'type': 'reasoning.text', 'text': 'hm', 'index': 0}]}},
+     'stop': 'end'},
+]
+
+
+class Rendering(unittest.TestCase):
+    def test_claude_replays_own_turns_and_labels_others(self):
+        messages = claude.render(HISTORY, OPUS)
+        self.assertEqual(messages[1]['content'], HISTORY[1]['raw']['claude'])  # exact replay, thinking kept
+        image = [b for b in messages[2]['content'][0]['content'] if b['type'] == 'image']
+        self.assertEqual(len(image), 1)
+        self.assertEqual(messages[3]['content'][0]['text'], '[Earlier reply by GLM]\n\nPrices rose.')
+        self.assertEqual(claude.render(HISTORY, OPUS), messages)  # deterministic
+
+    def test_openrouter_vision_model_gets_plot_as_user_image(self):
+        messages = openrouter.render(HISTORY, GLM)
+        self.assertEqual(messages[0]['content'], system_prompt(vision=True))
+        assistant = messages[2]
+        self.assertTrue(assistant['content'].startswith('[Earlier reply by Claude Opus 5.5]'))
+        self.assertEqual(assistant['tool_calls'][0]['function']['name'], 'visualize_mms')
+        self.assertNotIn('reasoning_details', assistant)
+        self.assertEqual(messages[3]['role'], 'tool')
+        self.assertEqual(messages[4]['content'][1]['type'], 'image_url')
+        self.assertEqual(messages[5]['reasoning_details'], HISTORY[3]['raw']['openrouter']['reasoning_details'])
+
+    def test_text_only_model_gets_no_image_and_the_blurb(self):
+        messages = openrouter.render(HISTORY, TEXT)
+        self.assertIn(NO_VISION_BLURB, messages[0]['content'])
+        self.assertIn(NO_VISION_BLURB, messages[3]['content'])
+        self.assertFalse(any(m['role'] == 'user' and isinstance(m['content'], list) for m in messages))
+        self.assertNotIn('reasoning_details', messages[4])  # GLM reasoning is not sent to another model
+
+
+class Helpers(unittest.TestCase):
+    def test_reasoning_fragments_merge_by_index(self):
+        merged = []
+        openrouter._merge_reasoning(merged, [{'type': 'reasoning.text', 'index': 0, 'text': 'Hel', 'signature': None}])
+        openrouter._merge_reasoning(merged, [{'type': 'reasoning.text', 'index': 0, 'text': 'lo', 'signature': 'abc'}])
+        openrouter._merge_reasoning(merged, [{'type': 'reasoning.encrypted', 'index': 1, 'data': 'xyz'}])
+        self.assertEqual(merged, [{'type': 'reasoning.text', 'index': 0, 'text': 'Hello', 'signature': 'abc'},
+                                  {'type': 'reasoning.encrypted', 'index': 1, 'data': 'xyz'}])
+
+    def test_call_ids_fit_anthropic_pattern(self):
+        self.assertEqual(openrouter._call_id('functions.query_mms:0'), 'functions_query_mms_0')
+        self.assertTrue(openrouter._call_id(None).startswith('call_'))
+
+    def test_claude_request_options_per_model(self):
+        opus = claude.request_options('claude-opus-5-5')
+        self.assertEqual(opus['fallbacks'], 'default')
+        self.assertEqual(opus['thinking']['display'], 'updates')
+        self.assertNotIn('fallbacks', claude.request_options('claude-haiku-5-5'))
+        self.assertEqual(claude.request_options('claude-haiku-4-5-20251001'), {})
+
+
+class FakeProvider:
+    """Calls query_mms once, then answers; optionally fails on the second request."""
+
+    def __init__(self, fail=False):
+        self.fail, self.calls = fail, 0
+
+    async def respond(self, model, history):
+        self.calls += 1
+        if self.calls == 1:
+            yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},
+                   'tool_calls': [{'id': 'c1', 'name': 'query_mms', 'input': {'sql': 'SELECT 42 AS answer'}}],
+                   'stop': 'tool_use'}
+            return
+        if self.fail:
+            raise RuntimeError('provider down')
+        yield {'type': 'text', 'delta': 'It is 42.'}
+        yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': 'It is 42.',
+               'raw': {}, 'tool_calls': [], 'stop': 'end'}
+
+
+class TurnLoop(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        path = Path(self.directory.name) / 'nem.duckdb'
+        duckdb.connect(str(path)).close()
+        self.db = duckdb.connect(str(path), read_only=True)
+
+    def tearDown(self):
+        self.db.close()
+        self.directory.cleanup()
+
+    def run_turn(self, provider, conversation, text='question'):
+        async def collect():
+            return [e async for e in run_turn({'openrouter': provider}, self.db, conversation, text, GLM)]
+        return asyncio.run(collect())
+
+    def test_tool_round_trip_records_history_and_final_table(self):
+        conversation = Conversation()
+        events = self.run_turn(FakeProvider(), conversation)
+        self.assertEqual([e['type'] for e in events], ['tool_running', 'text', 'table'])
+        self.assertEqual(events[-1]['rows'], [[42]])
+        roles = [e['role'] for e in conversation.history]
+        self.assertEqual(roles, ['user', 'assistant', 'tool', 'assistant'])
+        self.assertEqual(conversation.history[2]['results'][0]['text'], 'answer\n42\n')
+
+    def test_failed_turn_is_rolled_back(self):
+        conversation = Conversation()
+        self.run_turn(FakeProvider(), conversation, 'first')
+        with self.assertRaises(RuntimeError):
+            self.run_turn(FakeProvider(fail=True), conversation, 'second')
+        self.assertEqual(len(conversation.history), 4)
+
+    def test_query_tool_rejects_writes(self):
+        text, image, events = query_tool(self.db, 'CREATE TABLE x (a INT)')
+        self.assertEqual((text, image, events), ('Only one SELECT query is allowed.', None, []))
+
+
+if __name__ == '__main__':
+    unittest.main()

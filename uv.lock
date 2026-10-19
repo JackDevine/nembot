@@ -539,6 +539,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "duckdb" },
     { name = "marimo" },
+    { name = "openai" },
     { name = "starlette" },
     { name = "uvicorn" },
     { name = "vl-convert-python" },
@@ -550,9 +551,27 @@ requires-dist = [
     { name = "anthropic", specifier = ">=1.15.0" },
     { name = "duckdb", specifier = ">=1.4,<2" },
     { name = "marimo", specifier = ">=0.24.2" },
+    { name = "openai", specifier = ">=3.35.1" },
     { name = "starlette", specifier = ">=1.6.0" },
     { name = "uvicorn", specifier = ">=0.53.0" },
     { name = "vl-convert-python", specifier = ">=1.9.0.post1" },
+]
+
+[[package]]
+name = "openai"
+version = "3.35.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/87/4c/609b16f2a6e9a99f27a82ce93ff75868e7cb364fe6daff50cc0c1d620772/openai-3.35.1.tar.gz", hash = "sha256:b33e6561b90586e450def8a388e7d364755325da6884fc71348be5542e043bd0", size = 2250942, upload-time = "2026-10-18T01:06:38.964Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/22/7b/6d7e70f0762d1b286051bd7cb2fd0c364c1830d0f8826738673aeec05c2b/openai-3.35.1-py3-none-any.whl", hash = "sha256:264fd0fafc889021f526b7c1e5a2df5ca3e8dea874738ecd31da666434f25967", size = 2280230, upload-time = "2026-10-18T01:06:36.16Z" },
 ]
 
 [[package]]

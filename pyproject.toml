@@ -12,6 +12,7 @@ dependencies = [
     "anthropic>=1.15.0",
     "duckdb>=1.4,<2",
     "marimo>=0.24.2",
+    "openai>=3.35.1",
     "starlette>=1.6.0",
     "uvicorn>=0.53.0",
     "vl-convert-python>=1.9.0.post1",

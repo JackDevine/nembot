@@ -48,10 +48,13 @@ TOML config accepts the same keys (`tables`, `start`, `end`, `database`,
 uv run nemsplainer-chat   # http://127.0.0.1:8000
 ```
 
-A localhost chat analyst over `data/nem.duckdb` (opened read-only) using
-Claude via the Anthropic API. Credentials come from `ant auth login` or
-`ANTHROPIC_API_KEY`. Claude answers with SQL tables and interactive Vega-Lite
-plots. Flags: `--database`, `--host`, `--port`.
+A localhost chat analyst over `data/nem.duckdb` (opened read-only) that
+answers with SQL tables and interactive Vega-Lite plots. Pick the model next to
+the chat input: any Claude model via the Anthropic API (credentials from
+`ant auth login` or `ANTHROPIC_API_KEY`), or any tool-capable OpenRouter model
+(`OPENROUTER_API_KEY`). You can switch models mid-conversation; text-only
+models still make plots but can't see them. Flags: `--database`, `--host`,
+`--port`.
 
 ## Behavior
 

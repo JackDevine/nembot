@@ -468,6 +468,7 @@ class Conversation:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending: dict = field(default_factory=dict)  # download request id -> Future for the user's decision
     results: dict = field(default_factory=dict)  # 'R1' -> {'sql', 'plot_spec'} for reports
+    mode: str = 'analyst'  # or 'creator' (plugin building); fixed for the conversation
 
 
 DECISION_TIMEOUT = 1800  # seconds to wait for the user to approve or decline a download
@@ -552,8 +553,38 @@ async def request_download(db, jobs, conversation: Conversation, call: dict) -> 
         yield result(f'The download of {table} ({months}) failed: {job.error}', True)
 
 
+def mode_setup(mode: str, model: ModelInfo, web_search: bool, plugin_manager=None) -> tuple[str, list[dict]]:
+    """System prompt and tools for a conversation mode.
+
+    The analyst only sees plugin tools (and their one-line notes); how to build
+    plugins is documented solely in Creator mode's prompt.
+    """
+    if mode == 'creator':
+        from . import creator
+        system = creator.PROMPT + (_WEB_SEARCH if web_search else '')
+        return system, creator.TOOLS + [t for t in TOOLS if t['name'] in ('query_mms', 'describe_table')]
+    system = system_prompt(model.vision, web_search) + (plugin_manager.prompt_notes() if plugin_manager else '')
+    return system, TOOLS + (plugin_manager.tool_definitions() if plugin_manager else [])
+
+
+async def _plugin_tool(plugin_manager, tool, call) -> AsyncIterator[dict]:
+    from . import plugins
+    output = await plugins.call_tool(tool, call['input'] if isinstance(call['input'], dict) else {})
+    table = output.get('table')
+    if isinstance(table, dict) and table.get('columns'):
+        rows = [[_jsonable(v) for v in row] for row in table.get('rows', [])][:TABLE_ROWS]
+        yield {'type': 'table', 'sql': f'-- from plugin {tool.plugin}', 'columns': list(table['columns']),
+               'rows': rows, 'total': table.get('total', len(rows)), 'plugin': tool.plugin}
+    for event in output.get('events') or []:
+        if isinstance(event, dict):
+            yield {'type': 'plugin_event', 'plugin': tool.plugin, 'kind': str(event.get('kind', '')),
+                   'data': event.get('data')}
+    yield {'type': 'result', 'text': output['text'], 'is_error': output['is_error']}
+
+
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
-                   web_search: bool = False, jobs=None, exporter=None) -> AsyncIterator[dict]:
+                   web_search: bool = False, jobs=None, exporter=None, plugin_manager=None,
+                   creator=None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -564,10 +595,11 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     start = len(history)
     history.append({'role': 'user', 'text': text, 'context': await asyncio.to_thread(data_status, db)})
     latest_table = None
+    system, tools = mode_setup(conversation.mode, model, web_search, plugin_manager)
     try:
         for _ in range(MAX_ROUNDS):
             turn = None
-            async for item in provider.respond(model, history, web_search=web_search):
+            async for item in provider.respond(model, history, web_search=web_search, system=system, tools=tools):
                 if item.get('role') == 'assistant':
                     turn = item
                 else:
@@ -582,6 +614,23 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
             results = []
             for call in turn['tool_calls']:  # sequential: tools share the DuckDB connection
                 yield {'type': 'tool_running', 'name': call['name']}
+                special = None
+                if conversation.mode == 'creator' and creator is not None:
+                    from . import creator as creator_mode
+                    if call['name'] in creator_mode.TOOL_NAMES:
+                        special = creator.run(call, conversation, [t['name'] for t in TOOLS])
+                elif plugin_manager is not None and (tool := plugin_manager.find_tool(call['name'])):
+                    special = _plugin_tool(plugin_manager, tool, call)
+                if special is not None:
+                    async for event in special:
+                        if event['type'] == 'result':
+                            results.append({'id': call['id'], 'name': call['name'], 'text': event['text'],
+                                            'image': None, 'is_error': event['is_error']})
+                        elif event['type'] == 'table':
+                            latest_table = event
+                        else:
+                            yield event
+                    continue
                 if call['name'] == 'request_download' and valid_input(call['name'], call['input']):
                     async for event in request_download(db, jobs, conversation, call):
                         if event['type'] == 'result':

@@ -14,8 +14,9 @@ from .models import ModelInfo
 log = logging.getLogger(__name__)
 
 BASE_URL = 'https://openrouter.ai/api/v1'
-FUNCTIONS = [{'type': 'function', 'function': {'name': t['name'], 'description': t['description'],
-                                               'parameters': t['input_schema']}} for t in TOOLS]
+def functions(tools: list[dict]) -> list[dict]:
+    return [{'type': 'function', 'function': {'name': t['name'], 'description': t['description'],
+                                              'parameters': t['input_schema']}} for t in tools]
 
 
 def _call_id(value: str | None) -> str:
@@ -27,9 +28,9 @@ def _call_id(value: str | None) -> str:
 WEB_SEARCH = {'type': 'openrouter:web_search', 'parameters': {'max_results': 5}}
 
 
-def render(history: list, model: ModelInfo, web_search: bool = False) -> list[dict]:
+def render(history: list, model: ModelInfo, web_search: bool = False, system: str | None = None) -> list[dict]:
     """Neutral history -> OpenAI chat messages for ``model``. Deterministic per model."""
-    messages = [{'role': 'system', 'content': system_prompt(model.vision, web_search)}]
+    messages = [{'role': 'system', 'content': system or system_prompt(model.vision, web_search)}]
     for entry in history:
         if entry['role'] == 'user':
             text = entry['text'] + (f"\n\n{entry['context']}" if entry.get('context') else '')
@@ -110,11 +111,13 @@ class OpenRouterProvider:
             model=model.id, messages=[{'role': 'user', 'content': prompt}], max_tokens=1500)
         return (response.choices[0].message.content or '') if response.choices else ''
 
-    async def respond(self, model: ModelInfo, history: list, web_search: bool = False) -> AsyncIterator[dict]:
+    async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
+                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+        tools = functions(TOOLS if tools is None else tools)
         stream = await self.client.chat.completions.create(
             model=model.id,
-            messages=render(history, model, web_search),
-            tools=FUNCTIONS + [WEB_SEARCH] if web_search else FUNCTIONS,
+            messages=render(history, model, web_search, system),
+            tools=tools + [WEB_SEARCH] if web_search else tools,
             stream=True,
             stream_options={'include_usage': True},
         )

@@ -1,0 +1,4 @@
+name = "negative-prices"
+title = "Negative prices"
+description = "Tab with hours per day of negative dispatch prices by region, plus a chat tool for the share of negative-price intervals."
+version = "0.1.0"

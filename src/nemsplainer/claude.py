@@ -130,8 +130,9 @@ class ClaudeProvider:
             return ''
         return ''.join(b.text for b in response.content if b.type == 'text')
 
-    async def respond(self, model: ModelInfo, history: list, web_search: bool = False) -> AsyncIterator[dict]:
-        tools = [{**tool, 'eager_input_streaming': True} for tool in TOOLS]
+    async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
+                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+        tools = [{**tool, 'eager_input_streaming': True} for tool in (TOOLS if tools is None else tools)]
         if web_search:
             tools += web_tools(model.id)
         json_retries = 0
@@ -140,7 +141,7 @@ class ClaudeProvider:
                 async with self.client.beta.messages.stream(
                     model=model.id,
                     max_tokens=64000,
-                    system=system_prompt(vision=True, web_search=web_search),
+                    system=system or system_prompt(vision=True, web_search=web_search),
                     tools=tools,
                     messages=render(history, model),
                     cache_control={'type': 'ephemeral'},

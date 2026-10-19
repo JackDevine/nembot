@@ -180,8 +180,8 @@ function drawTable() {
     if (!explorer.docsOpen) tableView.append(el('h3', '', 'Columns'), columnsTable(d));
     return;
   }
-  tableView.append(filterBar(d), el('div', 'tablewrap', ''), el('div', 'pager'));
-  loadRows();
+  explorer.grid = dataGrid(d);
+  tableView.append(filterBar(d), explorer.grid);
 }
 
 function filterBar(d) {
@@ -209,55 +209,38 @@ function filterBar(d) {
     }
     field(column, control);
   }
-  const size = el('select');
-  [10, 25, 50, 100].forEach(n => size.append(new Option(`${n} rows`, n)));
-  size.value = q.limit;
-  field('Page size', size).onchange = () => { q.limit = Number(size.value); q.offset = 0; loadRows(); };
   bar.onsubmit = e => e.preventDefault();
   return bar;
 }
 
-async function loadRows() {
-  const d = explorer.detail, q = explorer.query;
-  const params = new URLSearchParams({ offset: q.offset, limit: q.limit });
-  if (q.start) params.set('start', q.start);
-  if (q.end) params.set('end', q.end);
-  for (const [k, v] of Object.entries(q.values)) if (v) params.set(k, v);
-  const wrap = tableView.querySelector('.tablewrap'), pager = tableView.querySelector('.pager');
-  if (!wrap) return;
-  wrap.style.opacity = 0.5;
-  let data;
-  try {
-    data = await getJSON(`/api/explorer/tables/${d.name}/rows?${params}`);
-  } catch (err) {
-    wrap.replaceChildren(el('div', 'error', `⚠️ ${err.message}`));
-    wrap.style.opacity = 1;
-    return;
-  }
-  if (explorer.detail !== d) return;  // navigated away meanwhile
-  const columns = Object.fromEntries(d.columns.map(c => [c.name, c]));
-  const table = el('table', 'data-grid');
-  const head = el('tr');
-  for (const name of data.columns) {
-    const isKey = d.primary_key.includes(name);
-    const th = el('th', isKey ? 'key' : '', name);
-    if (columns[name]) columnTooltip(th, columns[name], isKey);
-    head.append(th);
-  }
-  table.append(head);
-  for (const row of data.rows) {
-    const tr = el('tr');
-    row.forEach(v => tr.append(el('td', typeof v === 'number' ? 'num' : '', formatCell(v))));
-    table.append(tr);
-  }
-  wrap.replaceChildren(table);
-  wrap.style.opacity = 1;
-  const prev = el('button', '', '‹'), next = el('button', '', '›');
-  prev.disabled = q.offset === 0; next.disabled = q.offset + q.limit >= data.total;
-  prev.onclick = () => { q.offset = Math.max(0, q.offset - q.limit); loadRows(); };
-  next.onclick = () => { q.offset += q.limit; loadRows(); };
-  const first = data.total ? q.offset + 1 : 0, last = Math.min(q.offset + q.limit, data.total);
-  pager.replaceChildren(prev, el('span', '', `Rows ${first.toLocaleString()}–${last.toLocaleString()} of ${data.total.toLocaleString()}`), next);
+// The data view: a marimo-style table paged and sorted on the server.
+function dataGrid(d) {
+  const docs = Object.fromEntries(d.columns.map(c => [c.name, c]));
+  const kind = type => /^(DECIMAL|DOUBLE|BIGINT|INTEGER)/.test(type) ? 'number' : type === 'TIMESTAMP' ? 'datetime' : 'string';
+  return createDataTable({
+    columns: d.columns.map(c => ({ name: c.name, type: kind(c.type), dtype: c.type })),
+    pageSize: explorer.query.limit,
+    async fetchPage({ offset, limit, sort }) {
+      const q = explorer.query;
+      q.limit = limit;
+      const params = new URLSearchParams({ offset, limit });
+      if (q.start) params.set('start', q.start);
+      if (q.end) params.set('end', q.end);
+      for (const [k, v] of Object.entries(q.values)) if (v) params.set(k, v);
+      if (sort) { params.set('sort', sort.column); params.set('order', sort.desc ? 'desc' : 'asc'); }
+      const data = await getJSON(`/api/explorer/tables/${d.name}/rows?${params}`);
+      return { rows: data.rows, total: data.total };
+    },
+    decorateHeader(th, column) {
+      if (!docs[column.name]) return;
+      th.querySelector('.mo-th-name').classList.add('mo-has-tip');
+      columnTooltip(th.querySelector('.mo-th-name'), docs[column.name], d.primary_key.includes(column.name));
+    },
+  });
+}
+
+function loadRows() {
+  if (explorer.grid) explorer.grid.refresh();
 }
 
 // Download / Refresh / Download more buttons, from the table's download plan.

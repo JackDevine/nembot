@@ -1,5 +1,6 @@
 """Localhost web chat over the MMS database, backed by Claude or OpenRouter models."""
 import argparse
+from decimal import Decimal
 import asyncio
 import contextlib
 import json
@@ -16,7 +17,8 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import client, downloads, explorer, live, reports, snippets
+from . import client, downloads, explorer, live, plugins, reports, snippets
+from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
 from .chat import Conversation, run_turn
@@ -25,6 +27,15 @@ from .models import DEFAULT_MODEL, Catalog, public
 from .openrouter import OpenRouterProvider
 
 STATIC = Path(__file__).parent / 'static'
+
+
+def _json_default(value):
+    """JSON for plugin route results: numbers stay numbers, dates become ISO strings."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if hasattr(value, 'isoformat'):
+        return value.isoformat()
+    return str(value)
 
 
 def _api_error(exc: Exception) -> str:
@@ -42,7 +53,8 @@ def _api_error(exc: Exception) -> str:
     return f'{type(exc).__name__}: {exc}'
 
 
-def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://127.0.0.1:8000') -> Starlette:
+def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://127.0.0.1:8000',
+               plugins_dir: str = 'plugins') -> Starlette:
     # One read-write connection for the whole app: downloads write through a
     # cursor while chat/explorer reads use their own cursors (DuckDB MVCC).
     db = duckdb.connect(database)
@@ -50,6 +62,18 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     snippets.ensure(db)
     report_dir = Path(database).absolute().parent / 'reports'
     notebook_servers = NotebookServers(report_dir, url)
+
+    def plugin_query(sql: str):
+        import io
+        import polars
+        cursor = db.cursor()
+        try:
+            return polars.read_parquet(io.BytesIO(client.parquet_bytes(cursor, sql)))
+        finally:
+            cursor.close()
+    plugin_manager = plugins.PluginManager(Path(plugins_dir).absolute(), plugin_query)
+    plugin_manager.reload()
+    creator = Creator(plugin_manager, db, url, str(Path(database).absolute()))
 
     async def exporter(fmt, title, content, results):
         return await asyncio.to_thread(reports.export, db, report_dir, fmt, title, content, results,
@@ -78,7 +102,10 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': 'unknown model'}, status_code=400)
         if not model.tools or not model.available:
             return JSONResponse({'error': f'{model.name} cannot be used for this chat'}, status_code=400)
-        conversation = conversations.setdefault(conversation_id, Conversation())
+        mode = 'creator' if body.get('mode') == 'creator' else 'analyst'
+        conversation = conversations.setdefault(conversation_id, Conversation(mode=mode))
+        if conversation.mode != mode:
+            return JSONResponse({'error': 'start a new chat to switch modes'}, status_code=409)
         if conversation.lock.locked():
             return JSONResponse({'error': 'a reply is already in progress'}, status_code=409)
 
@@ -88,7 +115,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
                 try:
                     async for event in run_turn(providers, db, conversation, text, model,
                                                 web_search=bool(body.get('web_search')), jobs=jobs,
-                                                exporter=exporter):
+                                                exporter=exporter, plugin_manager=plugin_manager,
+                                                creator=creator):
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
                     logging.getLogger(__name__).exception('chat turn failed')
@@ -193,6 +221,54 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': str(exc)}, status_code=500)
         return RedirectResponse(target)
 
+    async def plugin_list(request: Request):
+        return JSONResponse({'plugins': [p.public() for p in plugin_manager.plugins.values()],
+                             'directory': str(plugin_manager.directory)})
+
+    async def plugin_reload(request: Request):
+        await asyncio.to_thread(plugin_manager.reload)
+        return await plugin_list(request)
+
+    async def plugin_enable(request: Request):
+        body = await request.json()
+        name = request.path_params['name']
+        if name not in plugin_manager.plugins:
+            return JSONResponse({'error': 'unknown plugin'}, status_code=404)
+        await asyncio.to_thread(plugin_manager.set_enabled, name, bool(body.get('enabled')))
+        return await plugin_list(request)
+
+    async def plugin_asset(request: Request):
+        name, asset = request.path_params['name'], request.path_params['asset']
+        plugin = plugin_manager.plugins.get(name)
+        allowed = asset in ('client.js', 'style.css')
+        path = plugin.directory / asset if allowed and plugin and plugin.status == 'loaded' else None
+        if path is None or not path.exists():
+            return JSONResponse({'error': 'not found'}, status_code=404)
+        if asset == 'style.css':
+            return FileResponse(path, media_type='text/css')
+        # Scope client.js to its own API object, so it can't see other plugins' state.
+        source = path.read_text()
+        wrapped = f'nemsplainer.definePlugin({json.dumps(name)}, function (nemsplainer) {{\n{source}\n}});\n'
+        return Response(wrapped, media_type='text/javascript')
+
+    async def plugin_route(request: Request):
+        name, rest = request.path_params['name'], '/' + request.path_params['path']
+        handler = plugin_manager.route(name, request.method, rest)
+        if handler is None:
+            return JSONResponse({'error': f'no {request.method} route {rest} in plugin {name}'}, status_code=404)
+        try:
+            value = handler(request)
+            if asyncio.iscoroutine(value):
+                value = await value
+        except Exception as exc:
+            logging.getLogger(__name__).exception('plugin %s route %s failed', name, rest)
+            return JSONResponse({'error': f'{type(exc).__name__}: {exc}'}, status_code=500)
+        if isinstance(value, Response):
+            return value
+        if isinstance(value, str):
+            return Response(value, media_type='text/html')
+        return JSONResponse(json.loads(json.dumps(value, default=_json_default)))
+
     async def explorer_overview(request: Request):
         return JSONResponse(await asyncio.to_thread(explorer.overview, db))
 
@@ -205,7 +281,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         try:
             options = dict(offset=int(query.get('offset', 0)), limit=int(query.get('limit', 25)),
                            start=explorer.parse_date(query.get('start')), end=explorer.parse_date(query.get('end')),
-                           values={k: query[k] for k in explorer.FILTER_COLUMNS if query.get(k)})
+                           values={k: query[k] for k in explorer.FILTER_COLUMNS if query.get(k)},
+                           sort=query.get('sort'), descending=query.get('order') == 'desc')
         except ValueError as exc:
             return JSONResponse({'error': str(exc)}, status_code=400)
         result = await asyncio.to_thread(explorer.rows, db, request.path_params['name'].upper(), **options)
@@ -280,6 +357,11 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
         Route('/api/query', query, methods=['POST']),
+        Route('/api/plugins', plugin_list),
+        Route('/api/plugins/reload', plugin_reload, methods=['POST']),
+        Route('/api/plugins/{name}/enable', plugin_enable, methods=['POST']),
+        Route('/plugins/{name}/_assets/{asset}', plugin_asset),
+        Route('/plugins/{name}/{path:path}', plugin_route, methods=['GET', 'POST', 'PUT', 'DELETE']),
         Route('/api/reports', report_list),
         Route('/reports/{name}', report_file),
         Route('/notebooks/open/{name}', notebook_open),
@@ -301,6 +383,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Serve the NEM analyst chat on localhost.')
     parser.add_argument('--database', default='data/nem.duckdb', metavar='PATH')
     parser.add_argument('--cache-dir', default='data/cache', metavar='PATH')
+    parser.add_argument('--plugins-dir', default='plugins', metavar='PATH')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
@@ -309,7 +392,7 @@ def main() -> None:
     for noisy in ('httpx', 'httpx2', 'anthropic', 'openai'):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     try:
-        app = create_app(args.database, args.cache_dir, f'http://{args.host}:{args.port}')
+        app = create_app(args.database, args.cache_dir, f'http://{args.host}:{args.port}', args.plugins_dir)
     except duckdb.IOException as exc:
         parser.error(f'cannot open {args.database} for writing ({exc}). Is another nemsplainer process using it?')
     uvicorn.run(app, host=args.host, port=args.port)

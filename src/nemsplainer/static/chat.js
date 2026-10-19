@@ -5,6 +5,38 @@ const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
 let conversation = crypto.randomUUID();
+let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
+
+const CREATOR_INTRO = 'Creator mode builds plugins: new chat tools, tabs and buttons for nemsplainer. ' +
+  'Describe what you want. The assistant writes the plugin as a draft, tests it in a separate process, ' +
+  'and asks before installing it. Plugins run on your computer, so review what it shows you.';
+
+function drawModeSwitch() {
+  document.querySelectorAll('.mode-switch button').forEach(b => b.classList.toggle('active', b.dataset.mode === chatMode));
+  document.getElementById('chat-view').classList.toggle('creator', chatMode === 'creator');
+  input.placeholder = chatMode === 'creator'
+    ? 'Describe a feature to add, e.g. "a tab showing negative-price hours by region"…'
+    : 'Ask about NEM prices, demand or generation…';
+}
+
+// Start a fresh conversation in ``mode`` (switching modes always starts a new chat).
+function startChat(mode) {
+  chatMode = mode;
+  conversation = crypto.randomUUID();
+  log.replaceChildren();
+  if (mode === 'creator') log.append(el('div', 'creator-banner', CREATOR_INTRO));
+  drawModeSwitch();
+  location.hash = '#chat';
+  input.focus();
+}
+
+document.querySelectorAll('.mode-switch button').forEach(button => {
+  button.onclick = () => {
+    if (button.dataset.mode === chatMode) return;
+    if (log.querySelector('.turn') && !confirm('Switching modes starts a new chat. Continue?')) return;
+    startChat(button.dataset.mode);
+  };
+});
 
 // TODO: replace this toggle once there's a UI for choosing which tools are available.
 const webSearch = document.getElementById('web-search');
@@ -75,10 +107,16 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') picker.classList.remove('open'); });
 loadModels().catch(err => { modelButton.textContent = 'Models unavailable'; console.error(err); });
 
-document.getElementById('reset').onclick = () => {
-  conversation = crypto.randomUUID();
-  log.replaceChildren();
-};
+document.getElementById('reset').onclick = () => startChat(chatMode);
+drawModeSwitch();
+
+// Actions next to a chat table or plot: snippets plus any plugin buttons.
+function resultActions(event, text) {
+  const box = el('span', 'result-actions');
+  box.append(snippetButton({ sql: event.sql, plot_spec: event.plot_spec || null, question: text }),
+    ...pluginResultActions(event));
+  return box;
+}
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
 });
@@ -156,6 +194,31 @@ function updateDownloadCard(card, event) {
   }
 }
 
+// Approval card for installing a plugin that Creator mode built.
+function pluginInstallCard(event) {
+  const card = el('div', 'download-card install-card');
+  card.dataset.request = event.id;
+  card.append(el('div', 'download-card-head', `${event.replacing ? 'Update' : 'Install'} plugin “${event.plugin}”?`),
+    el('p', 'reason', event.summary));
+  const files = el('ul', 'install-files');
+  for (const f of event.files) files.append(el('li', 'mono', `${f.path} (${f.bytes.toLocaleString()} bytes)`));
+  card.append(files);
+  const test = event.test || {};
+  card.append(el('p', test.ok ? 'ok' : 'error', test.ok ? '✓ Loads cleanly in a test process.' : `✗ The last test found problems: ${test.load_error || test.client_js_error || test.error || 'see above'}`));
+  card.append(el('p', 'muted', 'Plugins run on your computer with nemsplainer’s permissions. Expand the 📝 entries above to review the code.'));
+  const install = el('button', 'primary', event.replacing ? 'Update' : 'Install'), skip = el('button', '', 'Not now');
+  const decide = async ok => {
+    install.disabled = skip.disabled = true;
+    await fetch('/api/chat/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation, request: event.id, approve: ok }) });
+  };
+  install.onclick = () => decide(true);
+  skip.onclick = () => decide(false);
+  const buttons = el('div', 'buttons'); buttons.append(skip, install);
+  card.append(buttons, el('div', 'install-status'));
+  return card;
+}
+
 async function ask(text) {
   const turn = el('div', 'turn');
   const reply = el('div', 'assistant');
@@ -189,9 +252,13 @@ async function ask(text) {
         status.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           create_report: 'Building the report (re-running its queries)…',
+          inspect_runtime: 'Inspecting the app…', list_plugin_files: 'Reading the plugin draft…',
+          read_plugin_file: 'Reading a plugin file…', write_plugin_file: 'Writing a plugin file…',
+          delete_plugin_file: 'Deleting a plugin file…', test_plugin: 'Testing the plugin in a separate process…',
+          install_plugin: 'Preparing to install…',
           web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
         break;
-      case 'plot': segment = null; place(renderPlot(event, snippetButton({ sql: event.sql, plot_spec: event.plot_spec, question: text }))); break;
+      case 'plot': segment = null; place(renderPlot(event, resultActions(event, text))); break;
       case 'sources': {
         segment = null;
         const box = el('div', 'sources', event.kind === 'cited' ? 'Sources' : 'Web pages consulted');
@@ -204,7 +271,46 @@ async function ask(text) {
         box.append(list); place(box);
         break;
       }
-      case 'table': segment = null; place(renderTable(event, snippetButton({ sql: event.sql, plot_spec: null, question: text }))); break;
+      case 'table': segment = null; place(renderTable(event, event.plugin ? null : resultActions(event, text))); break;
+      case 'plugin_event':
+        segment = null;
+        if (!renderPluginEvent(event, place)) place(el('pre', 'muted', `${event.plugin} · ${event.kind}: ${JSON.stringify(event.data)}`));
+        break;
+      case 'plugin_file': {
+        segment = null;
+        const lines = event.content.split('\n').length;
+        place(details(`📝 Wrote ${event.plugin}/${event.path} (${lines} line${lines === 1 ? '' : 's'})`, el('pre', '', event.content)));
+        break;
+      }
+      case 'plugin_test': {
+        segment = null;
+        const r = event.report;
+        const ok = r.ok;
+        const summary = ok ? `✓ Test passed for ${event.plugin}` : `✗ Test found problems in ${event.plugin}`;
+        const body = el('pre', '', JSON.stringify(r, null, 2));
+        const box = details(summary, body);
+        box.classList.add(ok ? 'test-ok' : 'test-failed');
+        place(box);
+        break;
+      }
+      case 'plugin_install_request': place(pluginInstallCard(event)); status.textContent = 'Waiting for your answer…'; segment = null; break;
+      case 'plugin_install_result': {
+        segment = null;
+        const card = reply.querySelector(`.install-card[data-request="${CSS.escape(event.id)}"]`);
+        const target = card ? card.querySelector('.install-status') : null;
+        const message = event.status === 'loaded' ? el('span', 'ok', `✓ Installed ${event.plugin}. `)
+          : event.status === 'declined' ? el('span', 'muted', 'Not installed; the draft is kept.')
+          : el('pre', 'job-error', event.error || event.status);
+        const nodes = [message];
+        if (event.status === 'loaded') {
+          const reload = el('button', 'small', 'Reload the page to load its UI');
+          reload.onclick = () => location.reload();
+          nodes.push(reload);
+        }
+        if (target) { card.querySelector('.buttons')?.remove(); target.replaceChildren(...nodes); }
+        else nodes.forEach(place);
+        break;
+      }
       case 'notice': status.textContent = event.message; break;
       case 'report': {
         segment = null;
@@ -238,7 +344,7 @@ async function ask(text) {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, message: text, model: currentModel && currentModel.ref, web_search: webSearch.checked }),
+      body: JSON.stringify({ conversation, message: text, model: currentModel && currentModel.ref, web_search: webSearch.checked, mode: chatMode }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));

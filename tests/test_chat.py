@@ -106,7 +106,7 @@ class FakeProvider:
     def __init__(self, fail=False):
         self.fail, self.calls = fail, 0
 
-    async def respond(self, model, history, web_search=False):
+    async def respond(self, model, history, web_search=False, **options):
         self.calls += 1
         if self.calls == 1:
             yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},
@@ -186,7 +186,7 @@ class FakeJobs:
 class DownloadRequester:
     """Asks to download DISPATCHLOAD, then answers."""
 
-    async def respond(self, model, history, web_search=False):
+    async def respond(self, model, history, web_search=False, **options):
         if history[-1]['role'] == 'user':
             yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},
                    'tool_calls': [{'id': 'd1', 'name': 'request_download', 'input': {

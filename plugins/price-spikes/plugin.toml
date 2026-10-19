@@ -1,0 +1,4 @@
+name = "price-spikes"
+title = "Price spikes"
+description = "Finds 5-minute dispatch price spikes and adds a Spikes tab summarising them by region and day."
+version = "0.1.0"

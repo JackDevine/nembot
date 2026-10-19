@@ -28,41 +28,17 @@ function renderMarkdown(text) {
   return DOMPurify.sanitize(marked.parse(text.replace(/(^|[^~\\])~(?!~)/g, '$1\\~')));
 }
 
-function formatCell(v) {
-  if (v === null) return '';
-  if (typeof v === 'number' && !Number.isInteger(v)) return v.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  return String(v);
-}
-
 // ``actions`` (optional) is an element placed next to the SQL, e.g. an "Add to snippets" button.
 function renderTable(event, actions) {
-  const wrap = el('div');
-  wrap.append(withActions(sqlBlock('SQL query', event.sql), actions, event.result_id));
-  const tableWrap = el('div', 'tablewrap');
-  const pager = el('div', 'pager');
-  wrap.append(tableWrap, pager);
-  const pageSize = 10;
-  const pages = Math.max(1, Math.ceil(event.rows.length / pageSize));
-  let page = 0;
-  function draw() {
-    const table = el('table');
-    const head = el('tr');
-    event.columns.forEach(c => head.append(el('th', '', c)));
-    table.append(head);
-    event.rows.slice(page * pageSize, (page + 1) * pageSize).forEach(row => {
-      const tr = el('tr');
-      row.forEach(v => tr.append(el('td', typeof v === 'number' ? 'num' : '', formatCell(v))));
-      table.append(tr);
-    });
-    tableWrap.replaceChildren(table);
-    const prev = el('button', '', '‹'), next = el('button', '', '›');
-    prev.disabled = page === 0; next.disabled = page >= pages - 1;
-    prev.onclick = () => { page--; draw(); };
-    next.onclick = () => { page++; draw(); };
-    const shown = event.total > event.rows.length ? ` (first ${event.rows.length} of ${event.total} rows)` : ` (${event.total} rows)`;
-    pager.replaceChildren(prev, el('span', '', `Page ${page + 1} of ${pages}${shown}`), next);
-  }
-  draw();
+  const wrap = el('div', 'result-table');
+  if (event.sql) wrap.append(withActions(sqlBlock('SQL query', event.sql), actions, event.result_id));
+  else if (actions) wrap.append(actions);
+  wrap.append(createDataTable({
+    columns: event.columns.map(name => ({ name })),
+    rows: event.rows,
+    total: event.total,
+    exportName: event.result_id ? `nemsplainer-${event.result_id}` : 'nemsplainer-table',
+  }));
   return wrap;
 }
 

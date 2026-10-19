@@ -63,6 +63,43 @@ first: a card in the chat shows the table, why it's needed, the proposed months
 (editable) and the download size. Approve it and the download runs in the
 chat, after which the assistant re-runs its query.
 
+## Tables that feel like marimo
+
+Every table in nemsplainer, whether chat results, the Explorer, Snippets or
+plugins, uses a port of [marimo](https://marimo.io)'s data table. If you like
+how marimo shows a dataframe, you get the same experience here:
+- bold column names with the data type underneath
+- sort on hover, plus a column menu (Asc / Desc / Clear sort / Copy column name)
+- right-aligned tabular numbers at full precision, and `None` pills
+- search, and Export to CSV / JSON / Markdown
+- the familiar "1,234 rows, 5 columns · 10 / page · Page 1 of N" footer
+
+The table was copied from marimo's open-source code (Apache-2.0) and rewritten
+as plain JavaScript, with no React; see [Acknowledgements](#acknowledgements).
+
+## Plugins and Creator mode
+
+nemsplainer can be extended with **plugins**: new chat tools, tabs, buttons on
+results and HTTP endpoints. A plugin is a folder in `plugins/` with a
+`plugin.toml` and any of `plugin.py` (server: tools, routes, a short note for the
+assistant), `client.js` (browser: tabs, renderers, buttons) and `style.css`. The
+**Plugins** tab lists them, with their status, errors and an on/off switch.
+`plugins/price-spikes` is a hand-written example, and `plugins/negative-prices`
+was built entirely in Creator mode.
+
+To build one, switch the chat to **Creator** mode (the toggle next to the model
+button) and describe the feature. Creator is a separate mode, so the analyst's
+prompt never fills up with app-building instructions. In Creator mode the
+assistant:
+1. inspects the running app and your data
+2. writes the plugin as a draft in `plugins/.drafts/`
+3. tests it in a separate process (catching load errors, tool errors and
+   JavaScript syntax errors)
+4. asks you before installing it
+
+Plugins run on your computer with nemsplainer's permissions, so only install
+code you trust. Installed plugins are backed up before being replaced.
+
 ## Snippets
 
 Every table and plot in the chat has **☆ Add to snippets**. It saves the SQL
@@ -112,3 +149,18 @@ holds the database open for writing, so stop it before using the CLI.
   the `_nemsplainer.files` table.
 - This build performs a single run and exits; there is no automatic polling.
   Data freshness is bounded by AEMO's monthly publication schedule.
+
+## Acknowledgements
+
+- **marimo**: nemsplainer's data tables are ported from
+  [marimo](https://github.com/marimo-team/marimo)'s data table, Copyright 2026
+  Marimo, licensed under the Apache License 2.0. The look, layout, colours,
+  formatting and interactions come from marimo; the code was rewritten without
+  React, TanStack Table or Tailwind. The notebook export also targets marimo.
+  See `LICENSES/marimo-LICENSE.txt` and the header of
+  `src/nemsplainer/static/datatable.js`.
+- **Lucide**: table icons from [Lucide](https://lucide.dev) (ISC licence), as
+  used by marimo. See `LICENSES/lucide-LICENSE.txt`.
+- **DeepSeek Harness**: the plugin architecture and the separate Creator mode
+  for building plugins are modelled on [DeepSeek Harness](https://deepseek.com/en/harness/).
+  No code was taken from it.

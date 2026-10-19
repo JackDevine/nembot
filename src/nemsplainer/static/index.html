@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nemsplainer</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚡</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=PT+Sans:ital,wght@0,400;0,700;1,400&display=swap">
 <link rel="stylesheet" href="/static/app.css">
 <script src="https://cdn.jsdelivr.net/npm/vega@6"></script>
 <script src="https://cdn.jsdelivr.net/npm/vega-lite@6"></script>
@@ -21,6 +23,7 @@
       <a href="#explorer" data-view="explorer">Explorer</a>
       <a href="#snippets" data-view="snippets">Snippets</a>
       <a href="#reports" data-view="reports">Reports</a>
+      <a href="#plugins" data-view="plugins">Plugins</a>
     </nav>
   </div>
   <div class="header-right">
@@ -44,6 +47,10 @@
     </div>
     <form id="form">
       <div>
+        <div class="mode-switch" role="group" aria-label="Chat mode">
+          <button type="button" data-mode="analyst" title="Ask questions about NEM data">Analyst</button>
+          <button type="button" data-mode="creator" title="Build or change plugins that add features to nemsplainer">Creator</button>
+        </div>
         <button type="button" id="model-button" title="Choose model">Loading models…</button>
         <label class="toggle" title="Let the model search the web for context (billed per search)."><input type="checkbox" id="web-search"> Web search</label>
       </div>
@@ -73,27 +80,41 @@
   <main id="snippet-view"><p class="empty">Choose a snippet on the left.</p></main>
 </section>
 
+<section id="plugins-view" class="view">
+  <main id="plugins-page"></main>
+</section>
+
+<section id="plugin-view-section" class="view">
+  <main id="plugin-view"></main>
+</section>
+
 <section id="reports-view" class="view">
   <main id="report-view"></main>
 </section>
 
 <script src="/static/common.js"></script>
+<script src="/static/datatable.js"></script>
 <script src="/static/downloads.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/explorer.js"></script>
 <script src="/static/snippets.js"></script>
 <script src="/static/reports.js"></script>
+<script src="/static/plugins.js"></script>
 <script>
-// Hash routing: #chat, #explorer, #explorer/<TABLE>.
+// Hash routing: #chat, #explorer[/<TABLE>], #snippets[/<id>], #reports, #plugins, #plugin/<plugin>/<tab>.
 function route() {
-  const [view, ...rest] = (location.hash.slice(1) || 'chat').split('/');
-  const name = ['chat', 'explorer', 'snippets', 'reports'].includes(view) ? view : 'chat';
-  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `${name}-view`));
-  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === name));
+  const hash = location.hash.slice(1) || 'chat';
+  const [view, ...rest] = hash.split('/');
+  const name = ['chat', 'explorer', 'snippets', 'reports', 'plugins', 'plugin'].includes(view) ? view : 'chat';
+  const section = name === 'plugin' ? 'plugin-view-section' : `${name}-view`;
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === section));
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === (name === 'plugin' ? hash : name)));
   document.getElementById('reset').style.visibility = name === 'chat' ? 'visible' : 'hidden';
   if (name === 'explorer') showExplorer(rest.join('/') || null);
   if (name === 'snippets') showSnippets(rest.join('/') || null);
   if (name === 'reports') showReports();
+  if (name === 'plugins') showPluginsPage();
+  if (name === 'plugin') showPluginTab(hash);
 }
 window.addEventListener('hashchange', route);
 route();

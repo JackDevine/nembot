@@ -14,3 +14,9 @@ data/
 
 # Marimo runtime state
 __marimo__/
+
+# Plugin working files (installed plugins themselves can be committed)
+plugins/.drafts/
+plugins/.backup/
+plugins/.state.json
+plugins/*/data/

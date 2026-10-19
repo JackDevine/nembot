@@ -112,7 +112,8 @@ def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
 
 
 def rows(db: duckdb.DuckDBPyConnection, name: str, *, offset: int = 0, limit: int = 25,
-         start: str | None = None, end: str | None = None, values: dict[str, str] | None = None) -> dict | None:
+         start: str | None = None, end: str | None = None, values: dict[str, str] | None = None,
+         sort: str | None = None, descending: bool = False) -> dict | None:
     entry = catalog.tables().get(name)
     if entry is None:
         return None
@@ -124,6 +125,8 @@ def rows(db: duckdb.DuckDBPyConnection, name: str, *, offset: int = 0, limit: in
     keys = [column] if column else []
     keys += [k for k in entry['primary_key'] if k != column]
     order = ', '.join(f'{_q(k)} DESC' if k == column else _q(k) for k in keys) or '1'
+    if sort in {c['name'] for c in entry['columns']}:  # a user-chosen sort column (from the catalogue only)
+        order = f"{_q(sort)} {'DESC' if descending else 'ASC'} NULLS LAST, {order}"
     cursor = db.cursor()
     try:
         if name not in _downloaded(cursor):

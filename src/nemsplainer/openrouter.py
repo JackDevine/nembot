@@ -24,9 +24,12 @@ def _call_id(value: str | None) -> str:
     return cleaned or f'call_{uuid.uuid4().hex[:24]}'
 
 
-def render(history: list, model: ModelInfo) -> list[dict]:
+WEB_SEARCH = {'type': 'openrouter:web_search', 'parameters': {'max_results': 5}}
+
+
+def render(history: list, model: ModelInfo, web_search: bool = False) -> list[dict]:
     """Neutral history -> OpenAI chat messages for ``model``. Deterministic per model."""
-    messages = [{'role': 'system', 'content': system_prompt(model.vision)}]
+    messages = [{'role': 'system', 'content': system_prompt(model.vision, web_search)}]
     for entry in history:
         if entry['role'] == 'user':
             messages.append({'role': 'user', 'content': entry['text']})
@@ -100,15 +103,15 @@ class OpenRouterProvider:
                                               default_headers={'X-Title': 'nemsplainer'})
         return self._client
 
-    async def respond(self, model: ModelInfo, history: list) -> AsyncIterator[dict]:
+    async def respond(self, model: ModelInfo, history: list, web_search: bool = False) -> AsyncIterator[dict]:
         stream = await self.client.chat.completions.create(
             model=model.id,
-            messages=render(history, model),
-            tools=FUNCTIONS,
+            messages=render(history, model, web_search),
+            tools=FUNCTIONS + [WEB_SEARCH] if web_search else FUNCTIONS,
             stream=True,
             stream_options={'include_usage': True},
         )
-        text, calls, reasoning = [], {}, []
+        text, calls, reasoning, sources = [], {}, [], {}
         finish, usage, in_text = None, None, False
         async for chunk in stream:
             error = _extra(chunk, 'error')
@@ -122,6 +125,10 @@ class OpenRouterProvider:
             choice = chunk.choices[0]
             delta = choice.delta
             _merge_reasoning(reasoning, _extra(delta, 'reasoning_details'))
+            for annotation in _extra(delta, 'annotations') or []:
+                citation = annotation.get('url_citation') if isinstance(annotation, dict) else None
+                if citation and citation.get('url') and citation['url'] not in sources:
+                    sources[citation['url']] = {'url': citation['url'], 'title': citation.get('title') or citation['url']}
             if delta.content:
                 if not in_text:
                     yield {'type': 'block', 'kind': 'text'}
@@ -143,8 +150,10 @@ class OpenRouterProvider:
                 finish = choice.finish_reason
 
         if usage:
-            log.info('openrouter %s: in=%s out=%s cost=%s finish=%s', model.id, usage.prompt_tokens,
-                     usage.completion_tokens, _extra(usage, 'cost'), finish)
+            log.info('openrouter %s: in=%s out=%s cost=%s searches=%s finish=%s', model.id, usage.prompt_tokens,
+                     usage.completion_tokens, _extra(usage, 'cost'), _extra(usage, 'server_tool_use'), finish)
+        if sources:
+            yield {'type': 'sources', 'kind': 'cited', 'sources': list(sources.values())}
         if finish == 'content_filter':
             yield {'type': 'error', 'message': 'The model declined this request.'}
             return

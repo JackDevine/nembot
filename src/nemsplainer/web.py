@@ -70,7 +70,8 @@ def create_app(database: str) -> Starlette:
             async with conversation.lock:
                 yield f"data: {json.dumps({'type': 'model', 'model': public(model)})}\n\n"
                 try:
-                    async for event in run_turn(providers, db, conversation, text, model):
+                    async for event in run_turn(providers, db, conversation, text, model,
+                                                web_search=bool(body.get('web_search'))):
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
                     logging.getLogger(__name__).exception('chat turn failed')

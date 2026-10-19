@@ -96,8 +96,32 @@ SQL style rules:
 - Prices are fine to write as usual, e.g. $52.30/MWh."""
 
 
-def system_prompt(vision: bool) -> str:
-    return _PROMPT_HEAD + (_VISION_TOOLS if vision else _NO_VISION_TOOLS) + _PROMPT_TAIL
+_WEB_SEARCH = """
+
+Web search:
+- You can also search the web. Use it for context the database can't give: market
+  events, rule changes, outages, weather, AEMO reports and news that explain the data.
+- Answer data questions from the database tools, not the web. Mention which facts
+  came from the web; citations are shown to the user automatically."""
+
+
+def system_prompt(vision: bool, web_search: bool = False) -> str:
+    prompt = _PROMPT_HEAD + (_VISION_TOOLS if vision else _NO_VISION_TOOLS) + _PROMPT_TAIL
+    return prompt + _WEB_SEARCH if web_search else prompt
+
+
+def text_from_blocks(blocks: list[tuple[str, str]]) -> str:
+    """Join (type, text) blocks: adjacent text blocks (citation splits) join directly."""
+    parts, joined = [], False
+    for kind, text in blocks:
+        if kind != 'text':
+            joined = False
+        elif joined:
+            parts[-1] += text
+        else:
+            parts.append(text)
+            joined = True
+    return '\n\n'.join(parts)
 
 
 VISION_PLOT_NOTE = ('Inspect this plot of the SQL result and describe its key patterns. '
@@ -307,7 +331,8 @@ class Conversation:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo) -> AsyncIterator[dict]:
+async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
+                   web_search: bool = False) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -321,7 +346,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     try:
         for _ in range(MAX_ROUNDS):
             turn = None
-            async for item in provider.respond(model, history):
+            async for item in provider.respond(model, history, web_search=web_search):
                 if item.get('role') == 'assistant':
                     turn = item
                 else:

@@ -7,7 +7,9 @@ from pathlib import Path
 import duckdb
 
 from nemsplainer import claude, openrouter
-from nemsplainer.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt
+from types import SimpleNamespace as NS
+
+from nemsplainer.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt, text_from_blocks
 from nemsplainer.models import ModelInfo
 
 OPUS = ModelInfo('claude:claude-opus-5-5', 'claude', 'claude-opus-5-5', 'Claude Opus 5.5', True, True, True)
@@ -72,6 +74,24 @@ class Helpers(unittest.TestCase):
         self.assertEqual(openrouter._call_id('functions.query_mms:0'), 'functions_query_mms_0')
         self.assertTrue(openrouter._call_id(None).startswith('call_'))
 
+    def test_citation_split_text_rejoins_but_tool_separated_text_does_not(self):
+        blocks = [('text', 'Prices rose '), ('text', 'sharply.'), ('tool_use', ''), ('text', 'Done.')]
+        self.assertEqual(text_from_blocks(blocks), 'Prices rose sharply.\n\nDone.')
+
+    def test_claude_sources_prefer_citations_then_consulted_pages(self):
+        search = NS(type='web_search_tool_result', content=[NS(url='https://a', title='A'), NS(url='https://b', title='B')])
+        uncited = NS(type='text', text='x', citations=None)
+        self.assertEqual(claude.sources([search, uncited]),
+                         ('consulted', [{'url': 'https://a', 'title': 'A'}, {'url': 'https://b', 'title': 'B'}]))
+        cited = NS(type='text', text='x', citations=[NS(url='https://b', title='B')])
+        self.assertEqual(claude.sources([search, cited]), ('cited', [{'url': 'https://b', 'title': 'B'}]))
+
+    def test_web_search_changes_prompt_and_tools(self):
+        self.assertIn('Web search:', system_prompt(True, web_search=True))
+        self.assertNotIn('Web search:', system_prompt(True))
+        self.assertEqual(claude.web_tools('claude-opus-5-5')[0]['type'], 'web_search_20260209')
+        self.assertEqual(claude.web_tools('claude-haiku-5-5')[0]['type'], 'web_search_20250305')
+
     def test_claude_request_options_per_model(self):
         opus = claude.request_options('claude-opus-5-5')
         self.assertEqual(opus['fallbacks'], 'default')
@@ -86,7 +106,7 @@ class FakeProvider:
     def __init__(self, fail=False):
         self.fail, self.calls = fail, 0
 
-    async def respond(self, model, history):
+    async def respond(self, model, history, web_search=False):
         self.calls += 1
         if self.calls == 1:
             yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},

@@ -53,7 +53,9 @@ answers with SQL tables and interactive Vega-Lite plots. Pick the model next to
 the chat input: any Claude model via the Anthropic API (credentials from
 `ant auth login` or `ANTHROPIC_API_KEY`), or any tool-capable OpenRouter model
 (`OPENROUTER_API_KEY`). You can switch models mid-conversation; text-only
-models still make plots but can't see them. Flags: `--database`, `--host`,
+models still make plots but can't see them. A **Web search** toggle lets the
+model search the web for context (billed per search); sources are listed under
+the reply. Flags: `--database`, `--host`,
 `--port`.
 
 ## Behavior

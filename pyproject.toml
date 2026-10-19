@@ -8,12 +8,18 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "altair>=6.3.0",
+    "anthropic>=1.15.0",
     "duckdb>=1.4,<2",
     "marimo>=0.24.2",
+    "starlette>=1.6.0",
+    "uvicorn>=0.53.0",
+    "vl-convert-python>=1.9.0.post1",
 ]
 
 [project.scripts]
 nemsplainer = "nemsplainer.cli:main"
+nemsplainer-chat = "nemsplainer.web:main"
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]

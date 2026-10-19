@@ -42,6 +42,17 @@ Flags: `--tables`, `--start`, `--end`, `--database`, `--cache-dir`, `--config`.
 TOML config accepts the same keys (`tables`, `start`, `end`, `database`,
 `cache_dir`); CLI flags override config values.
 
+## Web chat
+
+```bash
+uv run nemsplainer-chat   # http://127.0.0.1:8000
+```
+
+A localhost chat analyst over `data/nem.duckdb` (opened read-only) using
+Claude via the Anthropic API. Credentials come from `ant auth login` or
+`ANTHROPIC_API_KEY`. Claude answers with SQL tables and interactive Vega-Lite
+plots. Flags: `--database`, `--host`, `--port`.
+
 ## Behavior
 
 - Data is appended cumulatively; reruns of the same window are idempotent.

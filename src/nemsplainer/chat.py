@@ -4,13 +4,14 @@ History is stored in a neutral format so a conversation can switch freely
 between models and providers. Each provider module renders it into its own
 wire format and streams back UI events plus one assistant turn:
 
-- ``{'role': 'user', 'text': str}``
+- ``{'role': 'user', 'text': str, 'context': str}`` (``context`` is the frozen <data_status> note)
 - ``{'role': 'assistant', 'model': ref, 'model_name': str, 'text': str, 'tool_calls': [{'id', 'name', 'input'}],
   'raw': {provider: provider-specific replay data}, 'stop': 'end' | 'tool_use' | 'pause'}``
 - ``{'role': 'tool', 'results': [{'id', 'name', 'text', 'image': base64 PNG | None, 'is_error': bool}]}``
 """
 import asyncio
 import base64
+import concurrent.futures
 import csv
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -23,6 +24,8 @@ import altair
 import duckdb
 import vl_convert
 
+from . import catalog, downloads, explorer
+from .ingest import SUPPORTED
 from .models import ModelInfo
 
 TABLE_ROWS = 200
@@ -32,8 +35,13 @@ NO_VISION_BLURB = ('I am unable to visually sense-check or comment on the result
 
 _PROMPT_HEAD = """You are a data analyst for Australia's National Electricity Market (NEM).
 
-You have two tools that execute DuckDB SQL against the `nem` database:
+Your tools work on a local DuckDB copy of AEMO's public MMS data (the `nem` database):
 - `query_mms(sql)` returns a short CSV preview and displays a table to the user.
+- `describe_table(table)` returns AEMO's data-model documentation for any MMS table
+  (description, keys, columns and their meaning) and which months are downloaded.
+- `request_download(table, start_month, end_month, reason)` asks the user to approve
+  downloading months of a table from AEMO. The user sees a popup and may change the
+  months. It returns once the download has finished, failed or been declined.
 """
 
 _VISION_TOOLS = """- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
@@ -62,19 +70,22 @@ The user can switch models mid-conversation. Earlier assistant turns that start 
 correct them as needed, but don't apologise for them as your own.
 
 Data coverage:
-- This database intentionally contains only a short date range. This is expected,
-  not a data-quality problem to investigate or a reason to delay answering.
-- Do NOT run preliminary date-range or coverage checks (such as MIN/MAX dates
-  or counts by date) unless the user explicitly asks about data coverage.
-- Go directly to the query or plot needed to answer the question. If the user
-  gives no date range, use the available data rather than assuming a recent
-  calendar window or checking which dates exist first.
-- Report what the query results and plots actually show. Do not apologize for,
-  speculate about, or repeatedly caveat the short date range, and do not seek
-  additional history. Keep conclusions scoped to the observed data; do not
-  extrapolate to unobserved periods.
-- Honor explicit date filters. If the requested query returns no rows, simply
-  say so rather than launching a separate coverage investigation.
+- The database holds only the tables and months the user has downloaded. Each user
+  message ends with a <data_status> note listing them. Trust it instead of running
+  coverage checks (no preliminary MIN/MAX or count-by-date queries).
+- Write queries as though every archive table listed below were available. If a query
+  fails because a table is missing, or the question needs months that <data_status>
+  shows are not downloaded, call `request_download` for that table and the months the
+  question needs (keep the range as small as the question allows; never more than 12
+  months unless the user asks), then re-run the query once the download succeeds.
+  If the user declines or the download fails, answer from the data that is available
+  and say what is missing.
+- Use `describe_table` when you need the columns of a table you haven't used yet.
+- If the user gives no date range, use the downloaded data rather than assuming a
+  recent calendar window. Do not apologize for, or repeatedly caveat, limited data.
+- Report what the query results and plots actually show. Keep conclusions scoped to
+  the observed data; do not extrapolate to unobserved periods.
+- Honor explicit date filters.
 
 Schema highlights (all tables in the `main` schema):
 - DISPATCHPRICE: 5-min dispatch prices per region — SETTLEMENTDATE (TIMESTAMP), REGIONID,
@@ -94,6 +105,19 @@ SQL style rules:
 - Regions are NSW1, QLD1, SA1, TAS1, VIC1.
 - After receiving tool output, reply with a concise 1-2 sentence insight about the data.
 - Prices are fine to write as usual, e.g. $52.30/MWh."""
+
+
+def _archive_tables() -> str:
+    """Static, cache-friendly list of every table the monthly archive publishes."""
+    lines = ['', '', 'Tables published in the MMS monthly archive (downloadable on request), by package:']
+    for package in catalog.load()['packages']:
+        names = [n for n in package['tables'] if catalog.tables()[n]['in_archive']]
+        if names:
+            lines.append(f"- {package['name']}: {', '.join(names)}")
+    return '\n'.join(lines)
+
+
+_PROMPT_TAIL += _archive_tables()
 
 
 _WEB_SEARCH = """
@@ -131,6 +155,32 @@ NO_VISION_PLOT_NOTE = ('The interactive plot is now displayed to the user. You c
 
 # Tool definitions in Anthropic's shape; providers convert as needed.
 TOOLS = [
+    {
+        'name': 'describe_table',
+        'description': ('Return AEMO data-model documentation for an MMS table: description, primary key, '
+                        'columns (type and meaning) and which months are downloaded locally.'),
+        'input_schema': {
+            'type': 'object',
+            'properties': {'table': {'type': 'string', 'description': 'MMS table name, e.g. DISPATCHLOAD.'}},
+            'required': ['table'],
+        },
+    },
+    {
+        'name': 'request_download',
+        'description': ('Ask the user to approve downloading whole months of an MMS table from AEMO. The user '
+                        'sees the table, months and estimated size and may change the months. Returns when '
+                        'the download has finished, failed, or was declined; then re-run your query.'),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'table': {'type': 'string', 'description': 'MMS table name from the archive list.'},
+                'start_month': {'type': 'string', 'description': 'First month, YYYY-MM.'},
+                'end_month': {'type': 'string', 'description': 'Last month, YYYY-MM (inclusive).'},
+                'reason': {'type': 'string', 'description': 'One sentence for the user: why this data is needed.'},
+            },
+            'required': ['table', 'start_month', 'end_month', 'reason'],
+        },
+    },
     {
         'name': 'query_mms',
         'description': (
@@ -304,6 +354,64 @@ def earlier_reply_label(entry: dict, model: ModelInfo) -> str:
     return f"[Earlier reply by {entry.get('model_name') or entry['model']}]"
 
 
+def _month_ranges(months: list[str]) -> str:
+    """['2026-06', '2026-07', '2026-09'] -> '2026-06 to 2026-07, 2026-09'."""
+    spans = []
+    for month in months:
+        if spans and downloads.next_month(spans[-1][1]) == month:
+            spans[-1][1] = month
+        else:
+            spans.append([month, month])
+    return ', '.join(a if a == b else f'{a} to {b}' for a, b in spans)
+
+
+_status_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def data_status(db) -> str:
+    """What is downloaded right now, frozen into each user message."""
+    lines = ['<data_status>', 'Downloaded tables:']
+    overview = explorer.overview(db)
+    tables = [t for p in overview['packages'] for t in p['tables'] if t['downloaded']]
+    for t in tables:
+        detail = explorer.table(db, t['name'])
+        parts = [f"{detail['rows']:,} rows"]
+        if detail['range']:
+            parts.append(f"{detail['time_column']} {detail['range'][0][:16]} to {detail['range'][1][:16]}")
+        months = downloads.loaded_months(db, t['name'])
+        if months:
+            parts.append(f'archive months {_month_ranges(months)}')
+        lines.append(f"- {t['name']}: {'; '.join(parts)}")
+    if not tables:
+        lines.append('- none')
+    try:  # don't let a slow or offline NEMWEB hold up the chat
+        latest = _status_pool.submit(downloads.latest_published, 'DISPATCHPRICE').result(timeout=5)
+    except Exception:
+        latest = catalog.load()['archive']['month']
+    lines += [f'Latest month published by AEMO: {latest}. Any other archive table can be requested.', '</data_status>']
+    return '\n'.join(lines)
+
+
+def describe_table(db, name: str) -> str:
+    entry = catalog.tables().get(name.upper())
+    if entry is None:
+        return f'Unknown table {name!r}. Use a name from the archive table list.'
+    detail = explorer.table(db, entry['name'])
+    months = downloads.loaded_months(db, entry['name'])
+    text = [f"{entry['name']} (package {entry['package']}): {entry['comment']}",
+            f"Kind: {catalog.kind(entry['name'])}; time column: {catalog.time_column(entry['name']) or 'none'}",
+            f"Primary key: {', '.join(entry['primary_key'])}",
+            f"In the monthly archive: {'yes' if entry['in_archive'] else 'no'}",
+            f"Downloaded: {'yes, ' + str(detail['rows']) + ' rows, months ' + _month_ranges(months) if detail['downloaded'] else 'no'}"]
+    description = ' '.join(b['text'] for b in entry['description'] if b['type'] == 'text')
+    if description:
+        text.append(f'Description: {description[:1500]}')
+    text.append('Columns:')
+    text += [f"- {c['name']} {c['type']}{' (PK)' if c['name'] in entry['primary_key'] else ''}: {c['comment']}"
+             for c in entry['columns']]
+    return '\n'.join(text)
+
+
 def valid_input(name: str, args) -> bool:
     # Inputs may arrive unvalidated (eager streaming, OpenAI-style JSON strings).
     required = REQUIRED_INPUTS.get(name)
@@ -317,6 +425,9 @@ async def execute_tool(db, call: dict) -> tuple[dict, list[dict]]:
     if not valid_input(name, args):
         result.update(text=json.dumps({'INVALID_JSON': json.dumps(args)}), is_error=True)
         return result, []
+    if name == 'describe_table':
+        result.update(text=await asyncio.to_thread(describe_table, db, args['table']))
+        return result, []
     if name == 'query_mms':
         text, image, events = await asyncio.to_thread(query_tool, db, args['sql'])
     else:
@@ -329,10 +440,78 @@ async def execute_tool(db, call: dict) -> tuple[dict, list[dict]]:
 class Conversation:
     history: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending: dict = field(default_factory=dict)  # download request id -> Future for the user's decision
+
+
+DECISION_TIMEOUT = 1800  # seconds to wait for the user to approve or decline a download
+
+
+async def request_download(db, jobs, conversation: Conversation, call: dict) -> AsyncIterator[dict]:
+    """Ask the user (via a chat popup) to approve a download, run it, and report back.
+
+    Yields UI events, then a final ``{'type': 'result', 'text', 'is_error'}``.
+    """
+    args, request_id = call['input'], call['id']
+    table = args['table'].strip().upper()
+
+    def result(text, is_error=False):
+        return {'type': 'result', 'text': text, 'is_error': is_error}
+
+    if jobs is None:
+        yield result('Downloads are not available in this app.', True)
+        return
+    if table not in SUPPORTED:
+        yield result(f'{table} is not published in the MMS monthly archive, so it cannot be downloaded.', True)
+        return
+    try:
+        downloads.month_range(args['start_month'], args['end_month'])
+        plan = await asyncio.to_thread(downloads.plan, db, table)
+    except (ValueError, RuntimeError) as exc:
+        yield result(f'Cannot request that download: {exc}', True)
+        return
+    future = asyncio.get_running_loop().create_future()
+    conversation.pending[request_id] = future
+    yield {'type': 'download_request', 'id': request_id, 'table': table, 'start': args['start_month'],
+           'end': args['end_month'], 'reason': args.get('reason', ''), 'comment': catalog.tables()[table]['comment'],
+           'plan': plan}
+    try:
+        decision = await asyncio.wait_for(future, DECISION_TIMEOUT)
+    except TimeoutError:
+        yield {'type': 'download_declined', 'id': request_id, 'timeout': True}
+        yield result('The user did not respond to the download request. Answer with the data available.')
+        return
+    finally:
+        conversation.pending.pop(request_id, None)
+    if not decision.get('approve'):
+        yield {'type': 'download_declined', 'id': request_id}
+        yield result('The user declined the download. Answer with the data that is available and say what is missing.')
+        return
+    try:
+        start, end = downloads.month_range(decision.get('start') or args['start_month'],
+                                           decision.get('end') or args['end_month'])
+    except ValueError as exc:
+        yield result(f'The months chosen were invalid: {exc}', True)
+        return
+    job = jobs.submit(table, start, end, reason='chat')
+    yield {'type': 'download_started', 'id': request_id, 'job': job.public()}
+    while job.status in ('queued', 'running'):
+        await asyncio.sleep(1)
+        yield {'type': 'download_progress', 'id': request_id, 'job': job.public()}
+    yield {'type': 'download_finished', 'id': request_id, 'job': job.public()}
+    months = f'{start:%Y-%m} to {end:%Y-%m}'
+    if job.status == 'done':
+        status = await asyncio.to_thread(describe_table, db, table)
+        yield result(f'Downloaded {table} for {months}. Re-run your query now.\n'
+                     + status.split('Columns:')[0].strip())
+    elif job.status == 'cancelled':
+        yield result(f'The user cancelled the download of {table} ({months}). Files that finished were kept; '
+                     'answer with the data available.')
+    else:
+        yield result(f'The download of {table} ({months}) failed: {job.error}', True)
 
 
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
-                   web_search: bool = False) -> AsyncIterator[dict]:
+                   web_search: bool = False, jobs=None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -341,7 +520,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     provider = providers[model.provider]
     history = conversation.history
     start = len(history)
-    history.append({'role': 'user', 'text': text})
+    history.append({'role': 'user', 'text': text, 'context': await asyncio.to_thread(data_status, db)})
     latest_table = None
     try:
         for _ in range(MAX_ROUNDS):
@@ -361,6 +540,14 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
             results = []
             for call in turn['tool_calls']:  # sequential: tools share the DuckDB connection
                 yield {'type': 'tool_running', 'name': call['name']}
+                if call['name'] == 'request_download' and valid_input(call['name'], call['input']):
+                    async for event in request_download(db, jobs, conversation, call):
+                        if event['type'] == 'result':
+                            results.append({'id': call['id'], 'name': call['name'], 'text': event['text'],
+                                            'image': None, 'is_error': event['is_error']})
+                        else:
+                            yield event
+                    continue
                 result, events = await execute_tool(db, call)
                 for event in events:
                     if event['type'] == 'table':

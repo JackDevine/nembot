@@ -83,6 +83,73 @@ input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
 });
 
+// The popup for a request_download tool call: approve (optionally changing months) or decline.
+function downloadRequestCard(event) {
+  const card = el('div', 'download-card');
+  const plan = event.plan;
+  const head = el('div', 'download-card-head');
+  const link = el('a', '', event.table); link.href = `#explorer/${event.table}`;
+  head.append(el('b', '', 'The assistant wants to download '), link);
+  const from = el('input'), to = el('input');
+  for (const input of [from, to]) { input.type = 'month'; input.min = plan.first_month; input.max = plan.latest_month; }
+  from.value = event.start; to.value = event.end;
+  const estimate = el('div', 'muted');
+  const update = () => {
+    if (!from.value || !to.value || from.value > to.value) { estimate.textContent = 'Choose a start month on or before the end month.'; return; }
+    const months = monthsBetween(from.value, to.value);
+    const already = plan.loaded_months.filter(m => m >= from.value && m <= to.value).length;
+    estimate.textContent = `${months} month${months === 1 ? '' : 's'}` + (already ? ` (${already} already downloaded)` : '')
+      + (plan.month_size === null ? '' : `, about ${formatBytes(plan.month_size * (months - already))}`)
+      + (plan.exact_days ? '' : '. Whole months are downloaded.');
+  };
+  from.oninput = to.oninput = update;
+  const months = el('div', 'months');
+  for (const [label, input] of [['From', from], ['To', to]]) { const l = el('label', '', label); l.append(input); months.append(l); }
+  const approve = el('button', 'primary', 'Download'), decline = el('button', '', 'Not now');
+  const buttons = el('div', 'buttons'); buttons.append(decline, approve);
+  const status = el('div', 'download-status');
+  const decide = async ok => {
+    approve.disabled = decline.disabled = from.disabled = to.disabled = true;
+    const response = await fetch('/api/chat/decision', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation, request: event.id, approve: ok, start: from.value, end: to.value }),
+    });
+    if (!response.ok) status.textContent = (await response.json()).error;
+  };
+  approve.onclick = () => decide(true);
+  decline.onclick = () => decide(false);
+  card.append(head, el('p', 'reason', event.reason), el('p', 'muted', event.comment), months, estimate, buttons, status);
+  update();
+  card.dataset.request = event.id;
+  return card;
+}
+
+function updateDownloadCard(card, event) {
+  const status = card.querySelector('.download-status');
+  card.querySelector('.buttons')?.remove();
+  if (event.type === 'download_declined') {
+    status.replaceChildren(el('span', 'muted', event.timeout ? 'No answer; the request expired.' : 'Declined.'));
+    return;
+  }
+  const job = event.job;
+  if (job.status === 'queued' || job.status === 'running') {
+    const bar = el('progress'); bar.max = 100;
+    const pct = jobPercent(job);
+    if (pct !== null) bar.value = pct;
+    const cancel = el('button', '', 'Cancel');
+    cancel.onclick = () => { cancel.disabled = true; cancelDownload(job.id); };
+    status.replaceChildren(bar, el('div', 'muted', jobSummary(job)), cancel);
+  } else if (job.status === 'done') {
+    status.replaceChildren(el('span', 'ok', `✓ Downloaded ${job.table} (${job.start.slice(0, 7)} to ${job.end.slice(0, 7)}).`));
+  } else if (job.status === 'cancelled') {
+    status.replaceChildren(el('span', 'muted', 'Download cancelled.'));
+  } else {
+    const box = el('div', 'job-panel failed');
+    box.append(el('b', '', 'Download failed'), el('pre', 'job-error', job.error));
+    status.replaceChildren(box);
+  }
+}
+
 async function ask(text) {
   const turn = el('div', 'turn');
   const reply = el('div', 'assistant');
@@ -114,6 +181,7 @@ async function ask(text) {
       case 'tool_running':
         segment = null;
         status.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
+          describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
         break;
       case 'plot': segment = null; place(renderPlot(event)); break;
@@ -131,6 +199,22 @@ async function ask(text) {
       }
       case 'table': segment = null; place(renderTable(event)); break;
       case 'notice': status.textContent = event.message; break;
+      case 'download_request':
+        segment = null;
+        place(downloadRequestCard(event));
+        status.textContent = 'Waiting for your answer…';
+        break;
+      case 'download_started':
+        refreshJobs();
+        // falls through
+      case 'download_progress':
+      case 'download_finished':
+      case 'download_declined': {
+        const card = reply.querySelector(`.download-card[data-request="${CSS.escape(event.id)}"]`);
+        if (card) updateDownloadCard(card, event);
+        status.textContent = event.type === 'download_progress' || event.type === 'download_started' ? 'Downloading…' : 'Thinking…';
+        break;
+      }
       case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
     }
   }

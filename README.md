@@ -58,6 +58,11 @@ model search the web for context (billed per search); sources are listed under
 the reply. Flags: `--database`, `--host`,
 `--port`.
 
+If a question needs a table or months you haven't downloaded, the assistant asks
+first: a card in the chat shows the table, why it's needed, the proposed months
+(editable) and the download size. Approve it and the download runs in the
+chat, after which the assistant re-runs its query.
+
 ## Explorer
 
 The **Explorer** tab lists every table published in the MMSDM monthly archive,

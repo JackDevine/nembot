@@ -1,14 +1,14 @@
 """Provider-neutral chat history, rendering and the turn loop (no network)."""
 import asyncio
-import tempfile
-import unittest
 from pathlib import Path
+import tempfile
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import patch
 
 import duckdb
 
 from nemsplainer import claude, openrouter
-from types import SimpleNamespace as NS
-
 from nemsplainer.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt, text_from_blocks
 from nemsplainer.models import ModelInfo
 
@@ -122,6 +122,9 @@ class FakeProvider:
 
 class TurnLoop(unittest.TestCase):
     def setUp(self):
+        latest = patch('nemsplainer.chat.downloads.latest_published', return_value='2026-09')
+        latest.start()
+        self.addCleanup(latest.stop)
         self.directory = tempfile.TemporaryDirectory()
         path = Path(self.directory.name) / 'nem.duckdb'
         duckdb.connect(str(path)).close()
@@ -159,3 +162,78 @@ class TurnLoop(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FakeJobs:
+    """Stands in for downloads.Downloads: jobs finish immediately."""
+
+    def __init__(self, status='done'):
+        self.status, self.submitted = status, []
+
+    def submit(self, table, start, end, reason='explorer'):
+        from nemsplainer.downloads import Job
+        job = Job(table, start, end, reason)
+        job.status = self.status
+        job.error = 'boom' if self.status == 'failed' else None
+        self.submitted.append(job)
+        return job
+
+
+class DownloadRequester:
+    """Asks to download DISPATCHLOAD, then answers."""
+
+    async def respond(self, model, history, web_search=False):
+        if history[-1]['role'] == 'user':
+            yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},
+                   'tool_calls': [{'id': 'd1', 'name': 'request_download', 'input': {
+                       'table': 'dispatchload', 'start_month': '2026-08', 'end_month': '2026-09', 'reason': 'Need it.'}}],
+                   'stop': 'tool_use'}
+            return
+        yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': 'ok', 'raw': {},
+               'tool_calls': [], 'stop': 'end'}
+
+
+class DownloadRequests(TurnLoop):
+    def converse(self, jobs, decision):
+        conversation = Conversation()
+
+        async def collect():
+            events = []
+            async for event in run_turn({'openrouter': DownloadRequester()}, self.db, conversation, 'q', GLM, jobs=jobs):
+                events.append(event)
+                if event['type'] == 'download_request':
+                    conversation.pending[event['id']].set_result(decision)
+            return events
+        plan = {'table': 'DISPATCHLOAD', 'loaded_months': [], 'latest_month': '2026-09', 'month_size': 1}
+        with patch('nemsplainer.chat.downloads.plan', return_value=plan):
+            events = asyncio.run(collect())
+        return events, conversation.history[2]['results'][0]
+
+    def test_approved_request_runs_a_job_with_the_users_months(self):
+        jobs = FakeJobs()
+        events, result = self.converse(jobs, {'approve': True, 'start': '2026-09', 'end': '2026-09'})
+        types = [e['type'] for e in events]
+        self.assertIn('download_request', types)
+        self.assertIn('download_finished', types)
+        job = jobs.submitted[0]
+        self.assertEqual((job.table, str(job.start), str(job.end)), ('DISPATCHLOAD', '2026-09-01', '2026-09-30'))
+        self.assertTrue(result['text'].startswith('Downloaded DISPATCHLOAD for 2026-09 to 2026-09'))
+        self.assertFalse(result['is_error'])
+
+    def test_declined_request_tells_the_model(self):
+        jobs = FakeJobs()
+        events, result = self.converse(jobs, {'approve': False})
+        self.assertEqual(jobs.submitted, [])
+        self.assertIn('declined', result['text'])
+
+    def test_failed_download_is_reported_as_an_error(self):
+        events, result = self.converse(FakeJobs('failed'), {'approve': True})
+        self.assertTrue(result['is_error'])
+        self.assertIn('boom', result['text'])
+
+    def test_user_messages_carry_a_frozen_data_status(self):
+        conversation = Conversation()
+        self.run_turn(FakeProvider(), conversation)
+        context = conversation.history[0]['context']
+        self.assertTrue(context.startswith('<data_status>'))
+        self.assertIn('Latest month published by AEMO: 2026-09', context)

@@ -78,7 +78,11 @@ def render(history: list, model: ModelInfo) -> list[dict]:
     messages = []
     for entry in history:
         if entry['role'] == 'user':
-            messages.append({'role': 'user', 'content': entry['text']})
+            if entry.get('context'):
+                messages.append({'role': 'user', 'content': [{'type': 'text', 'text': entry['text']},
+                                                             {'type': 'text', 'text': entry['context']}]})
+            else:
+                messages.append({'role': 'user', 'content': entry['text']})
         elif entry['role'] == 'assistant':
             label = earlier_reply_label(entry, model)
             raw = entry['raw'].get('claude')

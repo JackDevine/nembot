@@ -32,7 +32,8 @@ def render(history: list, model: ModelInfo, web_search: bool = False) -> list[di
     messages = [{'role': 'system', 'content': system_prompt(model.vision, web_search)}]
     for entry in history:
         if entry['role'] == 'user':
-            messages.append({'role': 'user', 'content': entry['text']})
+            text = entry['text'] + (f"\n\n{entry['context']}" if entry.get('context') else '')
+            messages.append({'role': 'user', 'content': text})
         elif entry['role'] == 'assistant':
             text = '\n\n'.join(part for part in (earlier_reply_label(entry, model), entry['text']) if part)
             message = {'role': 'assistant', 'content': text or None}

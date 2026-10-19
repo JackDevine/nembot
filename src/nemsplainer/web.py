@@ -78,7 +78,7 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
                 yield f"data: {json.dumps({'type': 'model', 'model': public(model)})}\n\n"
                 try:
                     async for event in run_turn(providers, db, conversation, text, model,
-                                                web_search=bool(body.get('web_search'))):
+                                                web_search=bool(body.get('web_search')), jobs=jobs):
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
                     logging.getLogger(__name__).exception('chat turn failed')
@@ -87,6 +87,16 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
 
         return StreamingResponse(events(), media_type='text/event-stream',
                                  headers={'Cache-Control': 'no-cache'})
+
+    async def chat_decision(request: Request):
+        """The user's answer to a request_download popup."""
+        body = await request.json()
+        conversation = conversations.get(str(body.get('conversation', '')))
+        future = conversation and conversation.pending.get(str(body.get('request', '')))
+        if not future or future.done():
+            return JSONResponse({'error': 'no pending download request'}, status_code=404)
+        future.set_result({'approve': bool(body.get('approve')), 'start': body.get('start'), 'end': body.get('end')})
+        return JSONResponse({'ok': True})
 
     async def explorer_overview(request: Request):
         return JSONResponse(await asyncio.to_thread(explorer.overview, db))
@@ -158,6 +168,7 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
         Route('/', index),
         Route('/api/models', models),
         Route('/api/chat', chat, methods=['POST']),
+        Route('/api/chat/decision', chat_decision, methods=['POST']),
         Route('/api/explorer', explorer_overview),
         Route('/api/explorer/tables/{name}', explorer_table),
         Route('/api/explorer/tables/{name}/rows', explorer_rows),

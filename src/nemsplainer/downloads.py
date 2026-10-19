@@ -117,6 +117,10 @@ class Downloads:
             job.finished = time.time()
 
 
+def next_month(month: str) -> str:
+    return f"{_month_shift(date.fromisoformat(month + '-01'), 1):%Y-%m}"
+
+
 def loaded_months(db: duckdb.DuckDBPyConnection, table: str) -> list[str]:
     """Archive months ('YYYY-MM') already loaded for ``table``, from the file log."""
     cursor = db.cursor()

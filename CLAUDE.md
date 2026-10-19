@@ -42,7 +42,8 @@ Three pieces share the DuckDB file `data/nem.duckdb` (`data/` and `__marimo__/` 
    - `web.py` (Starlette) streams UI events as SSE to `static/index.html` (vega-embed, marked, DOMPurify from CDN). Conversations live in memory keyed by a browser-generated id. OpenRouter needs `OPENROUTER_API_KEY`.
    - `explorer.py` — the read-only explorer API: overview (catalogue tables in the monthly archive, marked downloaded or not), table details (docs, row count, time-column range, `_nemsplainer.files` download history, filter options) and paged rows. Column names in SQL only ever come from the catalogue; filter values are always parameters. `catalog.time_column()`/`kind()` classify tables as interval, effective-dated or reference.
    - Front end: `static/index.html` is a shell with hash routing (`#chat`, `#explorer/<TABLE>`). The code lives in classic scripts that share globals, loaded in order: `common.js` (helpers), `downloads.js` (job polling, header indicator, progress/error panel, month-range dialog), `chat.js`, `explorer.js`, plus `app.css`.
-   - The system prompt and tool behaviour are duplicated from `load_mms.py`; keep them in sync if one changes.
+   - Missing data: `describe_table` documents any catalogue table. `request_download` emits a `download_request` event (an approval card in chat), then waits on a Future in `Conversation.pending`, which `POST /api/chat/decision` resolves. On approval it submits a normal download job, streams progress and returns a result telling the model to re-run its query. Each user message stores a frozen `<data_status>` note (`chat.data_status`) of what's downloaded; it's rendered after the user's text and never recomputed, so history replays identically. The archive table list sits in the static system prompt.
+   - The web chat's prompt and tools started as a copy of `load_mms.py` but have since moved on; the notebook is the legacy version.
 
 ## Tests
 

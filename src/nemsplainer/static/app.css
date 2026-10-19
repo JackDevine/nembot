@@ -123,3 +123,15 @@ nav a.active { background: var(--bg); color: var(--fg); font-weight: 600; }
 .modal .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .estimate.large { color: #9a6700; }
 .estimate.huge { color: #cf222e; }
+
+/* Chat download requests */
+.download-card { border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; background: #f6faff; max-width: 640px; }
+.download-card-head a { font-family: ui-monospace, monospace; }
+.download-card .reason { margin: 6px 0 2px; }
+.download-card .muted { margin: 2px 0; }
+.download-card .months { display: flex; gap: 16px; margin: 8px 0 4px; }
+.download-card label { display: flex; flex-direction: column; font-size: 13px; color: var(--muted); gap: 2px; }
+.download-card input { font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; }
+.download-card .buttons { display: flex; gap: 8px; margin-top: 8px; }
+.download-status progress { width: 100%; }
+.download-status .ok { color: #1a7f37; }

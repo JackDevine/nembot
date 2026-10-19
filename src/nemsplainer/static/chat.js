@@ -184,7 +184,7 @@ async function ask(text) {
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
         break;
-      case 'plot': segment = null; place(renderPlot(event)); break;
+      case 'plot': segment = null; place(renderPlot(event, snippetButton({ sql: event.sql, plot_spec: event.plot_spec, question: text }))); break;
       case 'sources': {
         segment = null;
         const box = el('div', 'sources', event.kind === 'cited' ? 'Sources' : 'Web pages consulted');
@@ -197,7 +197,7 @@ async function ask(text) {
         box.append(list); place(box);
         break;
       }
-      case 'table': segment = null; place(renderTable(event)); break;
+      case 'table': segment = null; place(renderTable(event, snippetButton({ sql: event.sql, plot_spec: null, question: text }))); break;
       case 'notice': status.textContent = event.message; break;
       case 'download_request':
         segment = null;

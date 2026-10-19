@@ -121,6 +121,15 @@ class ClaudeProvider:
     def __init__(self, client: anthropic.AsyncAnthropic):
         self.client = client
 
+    async def complete(self, model: ModelInfo, prompt: str) -> str:
+        """A short one-off answer (e.g. a snippet name), at low effort."""
+        options = {'output_config': {'effort': 'low'}} if model.id in _ADAPTIVE else {}
+        response = await self.client.messages.create(
+            model=model.id, max_tokens=4000, messages=[{'role': 'user', 'content': prompt}], **options)
+        if response.stop_reason == 'refusal':
+            return ''
+        return ''.join(b.text for b in response.content if b.type == 'text')
+
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False) -> AsyncIterator[dict]:
         tools = [{**tool, 'eager_input_streaming': True} for tool in TOOLS]
         if web_search:

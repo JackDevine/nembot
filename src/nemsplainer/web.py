@@ -15,7 +15,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import downloads, explorer
+from . import downloads, explorer, snippets
 from .ingest import SUPPORTED
 from .chat import Conversation, run_turn
 from .claude import ClaudeProvider
@@ -45,6 +45,7 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
     # cursor while chat/explorer reads use their own cursors (DuckDB MVCC).
     db = duckdb.connect(database)
     jobs = downloads.Downloads(db, Path(database).absolute(), Path(cache_dir).absolute())
+    snippets.ensure(db)
     claude = anthropic.AsyncAnthropic()
     catalog = Catalog(claude)
     providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider()}
@@ -97,6 +98,46 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
             return JSONResponse({'error': 'no pending download request'}, status_code=404)
         future.set_result({'approve': bool(body.get('approve')), 'start': body.get('start'), 'end': body.get('end')})
         return JSONResponse({'ok': True})
+
+    async def snippet_list(request: Request):
+        if request.method == 'GET':
+            return JSONResponse({'snippets': await asyncio.to_thread(snippets.list_all, db)})
+        body = await request.json()
+        sql = str(body.get('sql') or '').strip()
+        plot_spec = body.get('plot_spec') if isinstance(body.get('plot_spec'), dict) else None
+        if not sql:
+            return JSONResponse({'error': 'sql is required'}, status_code=400)
+        question = str(body.get('question') or '')[:2000] or None
+        name = snippets.fallback_name(sql, plot_spec)
+        model = await catalog.get(str(body.get('model') or DEFAULT_MODEL))
+        if model and model.available:
+            try:  # the current chat model suggests a name; the user can edit it
+                name = await asyncio.wait_for(
+                    providers[model.provider].complete(model, snippets.name_prompt(sql, plot_spec, question)), 60) or name
+            except Exception:
+                logging.getLogger(__name__).warning('snippet naming failed', exc_info=True)
+        snippet = await asyncio.to_thread(snippets.create, db, name=name, sql=sql, plot_spec=plot_spec,
+                                          question=question, model=model.ref if model else None,
+                                          conversation=str(body.get('conversation') or '') or None)
+        return JSONResponse(snippet)
+
+    async def snippet_item(request: Request):
+        snippet_id = int(request.path_params['id'])
+        if request.method == 'DELETE':
+            await asyncio.to_thread(snippets.delete, db, snippet_id)
+            return JSONResponse({'ok': True})
+        if request.method == 'PATCH':
+            body = await request.json()
+            snippet = await asyncio.to_thread(snippets.rename, db, snippet_id, str(body.get('name', '')))
+        else:
+            snippet = await asyncio.to_thread(snippets.get, db, snippet_id)
+        return JSONResponse(snippet) if snippet else JSONResponse({'error': 'unknown snippet'}, status_code=404)
+
+    async def snippet_run(request: Request):
+        snippet = await asyncio.to_thread(snippets.get, db, int(request.path_params['id']))
+        if not snippet:
+            return JSONResponse({'error': 'unknown snippet'}, status_code=404)
+        return JSONResponse({'snippet': snippet, **await asyncio.to_thread(snippets.run, db, snippet)})
 
     async def explorer_overview(request: Request):
         return JSONResponse(await asyncio.to_thread(explorer.overview, db))
@@ -169,6 +210,9 @@ def create_app(database: str, cache_dir: str = 'data/cache') -> Starlette:
         Route('/api/models', models),
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
+        Route('/api/snippets', snippet_list, methods=['GET', 'POST']),
+        Route('/api/snippets/{id:int}', snippet_item, methods=['GET', 'PATCH', 'DELETE']),
+        Route('/api/snippets/{id:int}/run', snippet_run),
         Route('/api/explorer', explorer_overview),
         Route('/api/explorer/tables/{name}', explorer_table),
         Route('/api/explorer/tables/{name}/rows', explorer_rows),

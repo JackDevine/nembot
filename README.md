@@ -63,6 +63,14 @@ first: a card in the chat shows the table, why it's needed, the proposed months
 (editable) and the download size. Approve it and the download runs in the
 chat, after which the assistant re-runs its query.
 
+## Snippets
+
+Every table and plot in the chat has **☆ Add to snippets**. It saves the SQL
+(and the Vega-Lite plot spec) to the `snippets` schema in your database, with
+a name suggested by the current model that you can edit. The **Snippets** tab
+lists them, and each one re-runs its SQL when you open it, so it always shows
+the latest data.
+
 ## Explorer
 
 The **Explorer** tab lists every table published in the MMSDM monthly archive,

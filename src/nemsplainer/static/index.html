@@ -19,6 +19,7 @@
     <nav>
       <a href="#chat" data-view="chat">Chat</a>
       <a href="#explorer" data-view="explorer">Explorer</a>
+      <a href="#snippets" data-view="snippets">Snippets</a>
     </nav>
   </div>
   <div class="header-right">
@@ -62,19 +63,30 @@
   <div id="tooltip" role="tooltip"></div>
 </section>
 
+<section id="snippets-view" class="view">
+  <aside id="snippet-list-pane">
+    <div class="source-line">Saved queries and plots. Each one re-runs its SQL when you open it, so you always see the latest data.</div>
+    <input id="snippet-search" type="search" placeholder="Search snippets…" autocomplete="off">
+    <div id="snippet-list"></div>
+  </aside>
+  <main id="snippet-view"><p class="empty">Choose a snippet on the left.</p></main>
+</section>
+
 <script src="/static/common.js"></script>
 <script src="/static/downloads.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/explorer.js"></script>
+<script src="/static/snippets.js"></script>
 <script>
 // Hash routing: #chat, #explorer, #explorer/<TABLE>.
 function route() {
   const [view, ...rest] = (location.hash.slice(1) || 'chat').split('/');
-  const name = ['chat', 'explorer'].includes(view) ? view : 'chat';
+  const name = ['chat', 'explorer', 'snippets'].includes(view) ? view : 'chat';
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `${name}-view`));
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === name));
   document.getElementById('reset').style.visibility = name === 'chat' ? 'visible' : 'hidden';
   if (name === 'explorer') showExplorer(rest.join('/') || null);
+  if (name === 'snippets') showSnippets(rest.join('/') || null);
 }
 window.addEventListener('hashchange', route);
 route();

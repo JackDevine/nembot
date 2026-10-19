@@ -104,6 +104,12 @@ class OpenRouterProvider:
                                               default_headers={'X-Title': 'nemsplainer'})
         return self._client
 
+    async def complete(self, model: ModelInfo, prompt: str) -> str:
+        """A short one-off answer (e.g. a snippet name)."""
+        response = await self.client.chat.completions.create(
+            model=model.id, messages=[{'role': 'user', 'content': prompt}], max_tokens=1500)
+        return (response.choices[0].message.content or '') if response.choices else ''
+
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False) -> AsyncIterator[dict]:
         stream = await self.client.chat.completions.create(
             model=model.id,

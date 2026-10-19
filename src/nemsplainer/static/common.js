@@ -34,9 +34,10 @@ function formatCell(v) {
   return String(v);
 }
 
-function renderTable(event) {
+// ``actions`` (optional) is an element placed next to the SQL, e.g. an "Add to snippets" button.
+function renderTable(event, actions) {
   const wrap = el('div');
-  wrap.append(sqlBlock('SQL query', event.sql));
+  wrap.append(withActions(sqlBlock('SQL query', event.sql), actions));
   const tableWrap = el('div', 'tablewrap');
   const pager = el('div', 'pager');
   wrap.append(tableWrap, pager);
@@ -65,11 +66,18 @@ function renderTable(event) {
   return wrap;
 }
 
-function renderPlot(event) {
+function withActions(node, actions) {
+  if (!actions) return node;
+  const row = el('div', 'result-bar');
+  row.append(node, actions);
+  return row;
+}
+
+function renderPlot(event, actions) {
   const wrap = el('div');
   const spec = el('div');
   spec.append(el('p', '', 'Data is supplied by the plot SQL above.'), el('pre', '', JSON.stringify(event.plot_spec, null, 2)));
-  wrap.append(sqlBlock('Plot SQL', event.sql), details('Plot specification', spec));
+  wrap.append(withActions(sqlBlock('Plot SQL', event.sql), actions), details('Plot specification', spec));
   const target = el('div');
   wrap.append(target);
   vegaEmbed(target, event.spec, { actions: { export: true, source: false, compiled: false, editor: false } })

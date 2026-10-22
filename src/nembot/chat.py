@@ -49,6 +49,11 @@ Your tools work on a local DuckDB copy of AEMO's public MMS data (the `nem` data
   content in markdown and put a result on its own line as [[R3]] to include it. Use ##
   headings for sections (each section becomes a slide in pptx). Include only results that
   support the narrative; the data is re-queried when the file is built.
+- `create_document(title, content)` creates a shared document that opens beside the chat,
+  where the user can edit it and highlight passages to ask you about them. Use it when the
+  user asks for a document, write-up, brief or draft to work on together (create_report is
+  for exported files). Content is markdown with [[R3]] result lines, as for reports; each
+  becomes a snapshot table or chart.
 """
 
 _VISION_TOOLS = """- `visualize_mms(sql, plot_spec)` takes SQL and a JSON-encoded Vega-Lite spec
@@ -93,8 +98,10 @@ Data coverage:
 - Report what the query results and plots actually show. Keep conclusions scoped to
   the observed data; do not extrapolate to unobserved periods.
 - Honor explicit date filters.
+"""
 
-Schema highlights (all tables in the `main` schema):
+# Shared with the document assistant (docs.py).
+_SCHEMA_GUIDE = """Schema highlights (all tables in the `main` schema):
 - DISPATCHPRICE: 5-min dispatch prices per region — SETTLEMENTDATE (TIMESTAMP), REGIONID,
   RRP (energy price $/MWh), plus FCAS prices (RAISE6SECRRP, RAISEREGRRP, RRP per MWh), ...
 - DISPATCHREGIONSUM: regional supply/demand — TOTALDEMAND, AVAILABLEGENERATION,
@@ -124,7 +131,8 @@ def _archive_tables() -> str:
     return '\n'.join(lines)
 
 
-_PROMPT_TAIL += _archive_tables()
+_SCHEMA_GUIDE += _archive_tables()
+_PROMPT_TAIL += '\n' + _SCHEMA_GUIDE
 
 
 _WEB_SEARCH = """
@@ -185,6 +193,20 @@ TOOLS = [
                 'content': {'type': 'string', 'description': 'Markdown with [[R<n>]] result markers on their own lines.'},
             },
             'required': ['format', 'title', 'content'],
+        },
+    },
+    {
+        'name': 'create_document',
+        'description': ('Create a shared document that opens beside the chat for the user to edit with you. content '
+                        'is markdown; put a result on its own line as [[R3]] to include a snapshot of that table or '
+                        'plot. Use ## headings for sections.'),
+        'input_schema': {
+            'type': 'object',
+            'properties': {
+                'title': {'type': 'string'},
+                'content': {'type': 'string', 'description': 'Markdown with [[R<n>]] result markers on their own lines.'},
+            },
+            'required': ['title', 'content'],
         },
     },
     {
@@ -563,6 +585,9 @@ def mode_setup(mode: str, model: ModelInfo, web_search: bool, plugin_manager=Non
         from . import creator
         system = creator.PROMPT + (_WEB_SEARCH if web_search else '')
         return system, creator.TOOLS + [t for t in TOOLS if t['name'] in ('query_mms', 'describe_table')]
+    if mode == 'doc':
+        from . import docs
+        return docs.system_prompt(web_search), docs.TOOLS + [t for t in TOOLS if t['name'] in ('query_mms', 'describe_table')]
     system = system_prompt(model.vision, web_search) + (plugin_manager.prompt_notes() if plugin_manager else '')
     return system, TOOLS + (plugin_manager.tool_definitions() if plugin_manager else [])
 
@@ -584,11 +609,13 @@ async def _plugin_tool(plugin_manager, tool, call) -> AsyncIterator[dict]:
 
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
                    web_search: bool = False, jobs=None, exporter=None, plugin_manager=None,
-                   creator=None) -> AsyncIterator[dict]:
+                   creator=None, documents=None, doc_session=None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
     table is shown, at the end of the turn, as in the marimo notebook.
+    ``documents(title, content, results)`` creates a shared document (create_document);
+    ``doc_session`` runs the suggest_* tools when nembot is tagged in a document.
     """
     provider = providers[model.provider]
     history = conversation.history
@@ -615,7 +642,9 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
             for call in turn['tool_calls']:  # sequential: tools share the DuckDB connection
                 yield {'type': 'tool_running', 'name': call['name']}
                 special = None
-                if conversation.mode == 'creator' and creator is not None:
+                if doc_session is not None and call['name'] in doc_session.tool_names:
+                    special = doc_session.run(call)
+                elif conversation.mode == 'creator' and creator is not None:
                     from . import creator as creator_mode
                     if call['name'] in creator_mode.TOOL_NAMES:
                         special = creator.run(call, conversation, [t['name'] for t in TOOLS])
@@ -625,7 +654,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                     async for event in special:
                         if event['type'] == 'result':
                             results.append({'id': call['id'], 'name': call['name'], 'text': event['text'],
-                                            'image': None, 'is_error': event['is_error']})
+                                            'image': event.get('image'), 'is_error': event['is_error']})
                         elif event['type'] == 'table':
                             latest_table = event
                         else:
@@ -638,6 +667,21 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                                             'image': None, 'is_error': event['is_error']})
                         else:
                             yield event
+                    continue
+                if call['name'] == 'create_document' and valid_input(call['name'], call['input']):
+                    result = {'id': call['id'], 'name': call['name'], 'image': None, 'is_error': False}
+                    try:
+                        if documents is None:
+                            raise RuntimeError('Documents are not available in this app.')
+                        doc = await documents(call['input']['title'], call['input']['content'], conversation.results)
+                        notes = ''.join([f" Unknown result ids: {', '.join(doc['missing'])}." if doc['missing'] else '',
+                                         f" Results that failed: {doc['errors']}." if doc['errors'] else ''])
+                        result['text'] = (f"Created document {doc['id']} \"{doc['title']}\". It is open beside the chat; "
+                                          f"the user can edit it and highlight passages to ask you about them.{notes}")
+                        yield {'type': 'document', **doc}
+                    except Exception as exc:
+                        result.update(text=f'Creating the document failed: {exc}', is_error=True)
+                    results.append(result)
                     continue
                 if call['name'] == 'create_report' and valid_input(call['name'], call['input']):
                     result = {'id': call['id'], 'name': call['name'], 'image': None, 'is_error': False}

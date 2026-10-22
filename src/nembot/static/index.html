@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nembot</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>⚡</text></svg>">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=PT+Sans:ital,wght@0,400;0,700;1,400&display=swap">
 <link rel="stylesheet" href="/static/app.css">
@@ -17,10 +17,11 @@
 <body>
 <header>
   <div class="brand">
-    <h1>nembot</h1>
+    <h1><img src="/static/logo.svg" alt="" class="logo">nembot</h1>
     <nav>
       <a href="#chat" data-view="chat">Chat</a>
       <a href="#explorer" data-view="explorer">Explorer</a>
+      <a href="#docs" data-view="docs">Docs</a>
       <a href="#snippets" data-view="snippets">Snippets</a>
       <a href="#reports" data-view="reports">Reports</a>
       <a href="#plugins" data-view="plugins">Plugins</a>
@@ -29,11 +30,16 @@
   <div class="header-right">
     <a id="download-indicator" class="download-indicator"></a>
     <button id="about-button" type="button" class="link-like" title="Where the data comes from and how it may be used">Data: AEMO</button>
-    <button id="reset" type="button">New chat</button>
   </div>
 </header>
 
 <section id="chat-view" class="view">
+  <aside id="chat-list-pane">
+    <button id="new-chat" type="button" class="primary">＋ New chat</button>
+    <input id="chat-search" type="search" placeholder="Search chats…" autocomplete="off">
+    <div id="chat-list"></div>
+  </aside>
+ <div id="chat-main">
   <main id="log"></main>
   <div class="composer">
     <div id="picker">
@@ -59,6 +65,20 @@
       <button class="primary" id="send">Send</button>
     </form>
   </div>
+ </div>
+  <aside id="doc-panel" hidden></aside>
+</section>
+
+<section id="docs-view" class="view">
+  <aside id="doc-list-pane">
+    <div class="source-line">Shared documents you write with nembot. Select text in a document to comment on it or ask nembot.</div>
+    <div class="doc-list-actions">
+      <input id="doc-search" type="search" placeholder="Search documents…" autocomplete="off">
+      <button id="new-doc" type="button" class="primary small">＋ New</button>
+    </div>
+    <div id="doc-list"></div>
+  </aside>
+  <main id="doc-page"></main>
 </section>
 
 <section id="explorer-view" class="view">
@@ -99,19 +119,22 @@
 <script src="/static/chat.js"></script>
 <script src="/static/explorer.js"></script>
 <script src="/static/snippets.js"></script>
+<script src="/static/docs.js"></script>
+<script src="/static/chats.js"></script>
 <script src="/static/reports.js"></script>
 <script src="/static/plugins.js"></script>
 <script>
-// Hash routing: #chat, #explorer[/<TABLE>], #snippets[/<id>], #reports, #plugins, #plugin/<plugin>/<tab>.
+// Hash routing: #chat[/<id>], #explorer[/<TABLE>], #docs[/<id>], #snippets[/<id>], #reports, #plugins, #plugin/<plugin>/<tab>.
 function route() {
   const hash = location.hash.slice(1) || 'chat';
   const [view, ...rest] = hash.split('/');
-  const name = ['chat', 'explorer', 'snippets', 'reports', 'plugins', 'plugin'].includes(view) ? view : 'chat';
+  const name = ['chat', 'explorer', 'docs', 'snippets', 'reports', 'plugins', 'plugin'].includes(view) ? view : 'chat';
   const section = name === 'plugin' ? 'plugin-view-section' : `${name}-view`;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === section));
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === (name === 'plugin' ? hash : name)));
-  document.getElementById('reset').style.visibility = name === 'chat' ? 'visible' : 'hidden';
+  if (name === 'chat') showChat(rest.join('/') || null);
   if (name === 'explorer') showExplorer(rest.join('/') || null);
+  if (name === 'docs') showDocs(rest.join('/') || null);
   if (name === 'snippets') showSnippets(rest.join('/') || null);
   if (name === 'reports') showReports();
   if (name === 'plugins') showPluginsPage();

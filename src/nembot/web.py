@@ -17,7 +17,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import client, downloads, explorer, live, plugins, reports, snippets
+from . import chats, client, docs, downloads, explorer, live, plugins, reports, snippets
 from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
@@ -27,6 +27,15 @@ from .models import DEFAULT_MODEL, Catalog, public
 from .openrouter import OpenRouterProvider
 
 STATIC = Path(__file__).parent / 'static'
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files the browser rechecks on every load (a cheap 304 when unchanged), so edits show on refresh."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers['Cache-Control'] = 'no-cache'
+        return response
 
 
 def _json_default(value):
@@ -60,6 +69,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     db = duckdb.connect(database)
     jobs = downloads.Downloads(db, Path(database).absolute(), Path(cache_dir).absolute())
     snippets.ensure(db)
+    docs.ensure(db)
+    chats.ensure(db)
     report_dir = Path(database).absolute().parent / 'reports'
     notebook_servers = NotebookServers(report_dir, url)
 
@@ -78,13 +89,18 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     async def exporter(fmt, title, content, results):
         return await asyncio.to_thread(reports.export, db, report_dir, fmt, title, content, results,
                                        url=url, database=str(Path(database).absolute()))
+    async def documents(title, content, results, conversation_id=None):
+        seed, missing, errors = await asyncio.to_thread(docs.seed_from_markdown, db, content, results)
+        doc = await asyncio.to_thread(docs.create, db, title, seed=seed, conversation=conversation_id)
+        return {'id': doc['id'], 'title': doc['title'], 'missing': missing, 'errors': errors}
+
     claude = anthropic.AsyncAnthropic()
     catalog = Catalog(claude)
     providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider()}
     conversations: dict[str, Conversation] = {}
 
     async def index(request: Request):
-        return FileResponse(STATIC / 'index.html')
+        return FileResponse(STATIC / 'index.html', headers={'Cache-Control': 'no-cache'})
 
     async def models(request: Request):
         listed = await catalog.models()
@@ -103,24 +119,69 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         if not model.tools or not model.available:
             return JSONResponse({'error': f'{model.name} cannot be used for this chat'}, status_code=400)
         mode = 'creator' if body.get('mode') == 'creator' else 'analyst'
+        web_search = bool(body.get('web_search'))
+        saved = None
+        if conversation_id not in conversations:  # a saved chat reopened after a restart
+            saved = await asyncio.to_thread(chats.get, db, conversation_id)
+            if saved:
+                conversations[conversation_id] = Conversation(history=saved['history'], results=saved['results'],
+                                                              mode=saved['mode'])
         conversation = conversations.setdefault(conversation_id, Conversation(mode=mode))
         if conversation.mode != mode:
             return JSONResponse({'error': 'start a new chat to switch modes'}, status_code=409)
         if conversation.lock.locked():
             return JSONResponse({'error': 'a reply is already in progress'}, status_code=409)
+        if saved is None and conversation.history:
+            saved = await asyncio.to_thread(chats.get, db, conversation_id)
+        transcript = saved['transcript'] if saved else []
+        # A new chat is named by its model from the first message, while the reply streams.
+        naming = None
+        if not saved or not saved['title']:
+            naming = asyncio.create_task(asyncio.wait_for(
+                providers[model.provider].complete(model, chats.title_prompt(text)), 60))
 
         async def events():
+            shown = []
+            turn = {'text': text, 'events': shown}
+
+            def store():
+                chats.save(db, conversation_id, mode=conversation.mode, web_search=web_search, model=model.ref,
+                           history=conversation.history, results=conversation.results,
+                           transcript=[*transcript, {**turn, 'events': chats.compact(shown)}])
+
             async with conversation.lock:
-                yield f"data: {json.dumps({'type': 'model', 'model': public(model)})}\n\n"
+                event = {'type': 'model', 'model': public(model)}
+                shown.append(event)
+                yield f'data: {json.dumps(event)}\n\n'
                 try:
                     async for event in run_turn(providers, db, conversation, text, model,
-                                                web_search=bool(body.get('web_search')), jobs=jobs,
+                                                web_search=web_search, jobs=jobs,
                                                 exporter=exporter, plugin_manager=plugin_manager,
-                                                creator=creator):
+                                                creator=creator,
+                                                documents=lambda *a: documents(*a, conversation_id)):
+                        shown.append(event)
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
                     logging.getLogger(__name__).exception('chat turn failed')
-                    yield f"data: {json.dumps({'type': 'error', 'message': _api_error(exc)})}\n\n"
+                    event = {'type': 'error', 'message': _api_error(exc)}
+                    shown.append(event)
+                    yield f'data: {json.dumps(event)}\n\n'
+                except BaseException:  # the browser went away mid-reply: keep what was shown
+                    store()
+                    if naming:
+                        naming.cancel()
+                    raise
+                await asyncio.to_thread(store)
+                if naming:
+                    try:
+                        title = await naming
+                    except Exception:
+                        logging.getLogger(__name__).warning('chat naming failed', exc_info=True)
+                        title = None
+                    title = await asyncio.to_thread(chats.set_title, db, conversation_id,
+                                                    title or chats.fallback_title(text), by_user=False)
+                    if title:
+                        yield f"data: {json.dumps({'type': 'chat_title', 'id': conversation_id, 'title': title})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         return StreamingResponse(events(), media_type='text/event-stream',
@@ -176,6 +237,111 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         if not snippet:
             return JSONResponse({'error': 'unknown snippet'}, status_code=404)
         return JSONResponse({'snippet': snippet, **await asyncio.to_thread(snippets.run, db, snippet)})
+
+    async def chat_list(request: Request):
+        return JSONResponse({'chats': await asyncio.to_thread(chats.list_all, db)})
+
+    async def chat_item(request: Request):
+        chat_id = request.path_params['id']
+        if request.method == 'DELETE':
+            conversation = conversations.get(chat_id)
+            if conversation and conversation.lock.locked():
+                return JSONResponse({'error': 'wait for the reply to finish'}, status_code=409)
+            conversations.pop(chat_id, None)
+            await asyncio.to_thread(chats.delete, db, chat_id)
+            return JSONResponse({'ok': True})
+        if request.method == 'PATCH':
+            body = await request.json()
+            title = await asyncio.to_thread(chats.set_title, db, chat_id, body.get('title'), by_user=True)
+            return JSONResponse({'id': chat_id, 'title': title}) if title else JSONResponse(
+                {'error': 'unknown chat or empty title'}, status_code=400)
+        chat = await asyncio.to_thread(chats.get, db, chat_id)
+        if not chat:
+            return JSONResponse({'error': 'unknown chat'}, status_code=404)
+        return JSONResponse({k: chat[k] for k in ('id', 'title', 'mode', 'web_search', 'model', 'transcript')})
+
+    async def doc_list(request: Request):
+        if request.method == 'GET':
+            return JSONResponse({'docs': await asyncio.to_thread(docs.list_all, db)})
+        body = await request.json()
+        return JSONResponse(await asyncio.to_thread(docs.create, db, body.get('title')))
+
+    async def doc_item(request: Request):
+        doc_id = int(request.path_params['id'])
+        if request.method == 'DELETE':
+            await asyncio.to_thread(docs.delete, db, doc_id)
+            return JSONResponse({'ok': True})
+        if request.method == 'PUT':
+            body = await request.json()
+            try:
+                saved = await asyncio.to_thread(docs.save, db, doc_id, title=body.get('title'),
+                                                content=body.get('content'), threads=body.get('threads'))
+            except ValueError as exc:
+                return JSONResponse({'error': str(exc)}, status_code=400)
+        else:
+            saved = await asyncio.to_thread(docs.get, db, doc_id)
+        return JSONResponse(saved) if saved else JSONResponse({'error': 'unknown document'}, status_code=404)
+
+    async def doc_image_upload(request: Request):
+        data = await request.body()
+        mime = request.headers.get('content-type', '').split(';')[0].strip().lower()
+        try:
+            key = await asyncio.to_thread(docs.add_image, db, int(request.path_params['id']), mime, data)
+        except LookupError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=404)
+        except ValueError as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+        return JSONResponse({'url': f'/api/docs/images/{key}'})
+
+    async def doc_image(request: Request):
+        image = await asyncio.to_thread(docs.get_image, db, request.path_params['key'])
+        if image is None:
+            return JSONResponse({'error': 'unknown image'}, status_code=404)
+        return Response(image[1], media_type=image[0], headers={'Cache-Control': 'private, max-age=31536000, immutable',
+                                                                'X-Content-Type-Options': 'nosniff'})
+
+    async def doc_block(request: Request):
+        """A table/chart snapshot for a document: new blocks from chat results, and Refresh."""
+        body = await request.json()
+        sql = str(body.get('sql') or '').strip()
+        if not sql:
+            return JSONResponse({'error': 'sql is required'}, status_code=400)
+        attrs = await asyncio.to_thread(docs.snapshot, db, sql, body.get('plot_spec') or None, str(body.get('title') or ''))
+        if isinstance(attrs, str):
+            return JSONResponse({'error': attrs}, status_code=400)
+        return JSONResponse(attrs)
+
+    async def doc_ask(request: Request):
+        """nembot tagged on a highlighted passage: stream its thread reply and suggestions."""
+        body = await request.json()
+        request_text = str(body.get('request', '')).strip()
+        blocks = [b for b in body.get('blocks') or [] if isinstance(b, dict) and isinstance(b.get('id'), str)
+                  and isinstance(b.get('text'), str)]
+        if not request_text:
+            return JSONResponse({'error': 'request is required'}, status_code=400)
+        model = await catalog.get(str(body.get('model') or DEFAULT_MODEL))
+        if model is None or not model.tools or not model.available:
+            return JSONResponse({'error': 'choose a model that can use tools'}, status_code=400)
+        messages = [m for m in body.get('messages') or [] if isinstance(m, dict)]
+        text = docs.ask_prompt(docs.clean_title(body.get('title')), blocks, str(body.get('quote', '')),
+                               body.get('quote_block') if isinstance(body.get('quote_block'), str) else None,
+                               messages, request_text)
+        conversation = Conversation(mode='doc')
+        session = docs.DocSession(db, blocks)
+
+        async def events():
+            yield f"data: {json.dumps({'type': 'model', 'model': public(model)})}\n\n"
+            try:
+                async for event in run_turn(providers, db, conversation, text, model,
+                                            web_search=bool(body.get('web_search')), doc_session=session):
+                    if event['type'] not in ('table', 'plot'):  # the thread shows text; data goes in via suggestions
+                        yield f'data: {json.dumps(event)}\n\n'
+            except Exception as exc:
+                logging.getLogger(__name__).exception('document ask failed')
+                yield f"data: {json.dumps({'type': 'error', 'message': _api_error(exc)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        return StreamingResponse(events(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache'})
 
     async def query(request: Request):
         """SELECT-only query endpoint for generated notebooks (Parquet response)."""
@@ -381,6 +547,13 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     async def lifespan(app):
         yield
         notebook_servers.stop()  # also registered with atexit
+        # Fold the write-ahead log into the database file, so the next start doesn't depend on
+        # replaying it (DuckDB 1.5 can fail to replay some logs, e.g. ALTER TABLE on a table
+        # whose rows are still only in the log).
+        try:
+            db.execute('CHECKPOINT')
+        except Exception:
+            logging.getLogger(__name__).warning('checkpoint on shutdown failed', exc_info=True)
 
     return Starlette(lifespan=lifespan, routes=[
         Route('/', index),
@@ -400,6 +573,14 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/snippets', snippet_list, methods=['GET', 'POST']),
         Route('/api/snippets/{id:int}', snippet_item, methods=['GET', 'PATCH', 'DELETE']),
         Route('/api/snippets/{id:int}/run', snippet_run),
+        Route('/api/chats', chat_list),
+        Route('/api/chats/{id}', chat_item, methods=['GET', 'PATCH', 'DELETE']),
+        Route('/api/docs', doc_list, methods=['GET', 'POST']),
+        Route('/api/docs/block', doc_block, methods=['POST']),
+        Route('/api/docs/images/{key}', doc_image),
+        Route('/api/docs/{id:int}', doc_item, methods=['GET', 'PUT', 'DELETE']),
+        Route('/api/docs/{id:int}/images', doc_image_upload, methods=['POST']),
+        Route('/api/docs/{id:int}/ask', doc_ask, methods=['POST']),
         Route('/api/explorer', explorer_overview),
         Route('/api/explorer/tables/{name}', explorer_table),
         Route('/api/explorer/tables/{name}/rows', explorer_rows),
@@ -409,7 +590,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/downloads', download_jobs, methods=['GET', 'POST']),
         Route('/api/downloads/plan/{name}', download_plan),
         Route('/api/downloads/{id:int}', download_job, methods=['POST', 'DELETE']),
-        Mount('/static', StaticFiles(directory=STATIC), name='static'),
+        Mount('/static', RevalidatingStaticFiles(directory=STATIC), name='static'),
     ])
 
 

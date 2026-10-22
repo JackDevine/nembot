@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120">
+  <defs><linearGradient id="head" gradientUnits="userSpaceOnUse" x1="0" y1="52" x2="0" y2="108"><stop offset="0" stop-color="#64748b"/><stop offset="1" stop-color="#1e293b"/></linearGradient></defs>
+  <rect x="13" y="70" width="12" height="20" rx="4" fill="#334155"/>
+  <rect x="95" y="70" width="12" height="20" rx="4" fill="#334155"/>
+  <rect x="22" y="52" width="76" height="56" rx="16" fill="url(#head)" stroke="#475569" stroke-width="2"/>
+  <circle cx="44" cy="78" r="8" fill="#38bdf8"/><circle cx="76" cy="78" r="8" fill="#38bdf8"/>
+  <circle cx="46.5" cy="75.5" r="2.5" fill="#fff"/><circle cx="78.5" cy="75.5" r="2.5" fill="#fff"/>
+  <rect x="46" y="94" width="28" height="5" rx="2.5" fill="#38bdf8" opacity=".6"/>
+  <g fill="#f59e0b">
+    <path d="M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z" transform="translate(60 26) rotate(0) scale(1.25)"/>
+    <path d="M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z" transform="translate(28 34) rotate(-32) scale(1.05)"/>
+    <path d="M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z" transform="translate(92 34) rotate(32) scale(1.05)"/>
+  </g>
+</svg>

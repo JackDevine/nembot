@@ -4,8 +4,12 @@ const log = document.getElementById('log');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
-let conversation = crypto.randomUUID();
+let conversation = null;    // the chat on screen
 let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
+// Each chat shown this session has its own pane in the log, so a reply keeps streaming into
+// its chat while you look at another. Panes of finished chats are dropped once hidden (the
+// saved chat is replayed if reopened). id -> {id, el, mode, webSearch, busy, waiting, firstText}
+const panes = new Map();
 
 const CREATOR_INTRO = 'Creator mode builds plugins: new chat tools, tabs and buttons for nembot. ' +
   'Describe what you want. The assistant writes the plugin as a draft, tests it in a separate process, ' +
@@ -19,21 +23,48 @@ function drawModeSwitch() {
     : 'Ask about NEM prices, demand or generation…';
 }
 
+function createPane(id, mode, webSearchOn) {
+  const pane = { id, el: el('div', 'chat-pane'), mode, webSearch: webSearchOn, busy: false, waiting: false, firstText: null };
+  pane.el.hidden = true;
+  if (mode === 'creator') pane.el.append(el('div', 'creator-banner', CREATOR_INTRO));
+  log.append(pane.el);
+  panes.set(id, pane);
+  return pane;
+}
+
+const currentPane = () => panes.get(conversation);
+
+// Put a chat's pane on screen, with its mode, web search setting and Send state.
+function showPane(id) {
+  const pane = panes.get(id);
+  const previous = currentPane();
+  if (previous && previous !== pane) previous.webSearch = webSearch.checked;
+  conversation = id;
+  chatMode = pane.mode;
+  webSearch.checked = pane.webSearch;
+  for (const other of [...panes.values()]) {
+    other.el.hidden = other !== pane;
+    if (other !== pane && !other.busy) { other.el.remove(); panes.delete(other.id); }
+  }
+  send.disabled = pane.busy;
+  drawModeSwitch();
+  window.drawChatList?.();
+  log.scrollTop = log.scrollHeight;
+}
+
 // Start a fresh conversation in ``mode`` (switching modes always starts a new chat).
 function startChat(mode) {
-  chatMode = mode;
-  conversation = crypto.randomUUID();
-  log.replaceChildren();
-  if (mode === 'creator') log.append(el('div', 'creator-banner', CREATOR_INTRO));
-  drawModeSwitch();
-  location.hash = '#chat';
+  const id = crypto.randomUUID();
+  createPane(id, mode, webSearch.checked);
+  showPane(id);
+  history.replaceState(null, '', '#chat');
   input.focus();
 }
 
 document.querySelectorAll('.mode-switch button').forEach(button => {
   button.onclick = () => {
     if (button.dataset.mode === chatMode) return;
-    if (log.querySelector('.turn') && !confirm('Switching modes starts a new chat. Continue?')) return;
+    if (currentPane()?.el.querySelector('.turn') && !confirm('Switching modes starts a new chat. Continue?')) return;
     startChat(button.dataset.mode);
   };
 });
@@ -107,14 +138,14 @@ document.addEventListener('click', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') picker.classList.remove('open'); });
 loadModels().catch(err => { modelButton.textContent = 'Models unavailable'; console.error(err); });
 
-document.getElementById('reset').onclick = () => startChat(chatMode);
-drawModeSwitch();
+// A blank chat to start with (without touching the address, which routing reads next).
+showPane(createPane(crypto.randomUUID(), chatMode, webSearch.checked).id);
 
 // Actions next to a chat table or plot: snippets plus any plugin buttons.
 function resultActions(event, text) {
   const box = el('span', 'result-actions');
-  box.append(snippetButton({ sql: event.sql, plot_spec: event.plot_spec || null, question: text }),
-    ...pluginResultActions(event));
+  const payload = { sql: event.sql, plot_spec: event.plot_spec || null, question: text };
+  box.append(snippetButton(payload), docButton(payload), ...pluginResultActions(event));
   return box;
 }
 input.addEventListener('keydown', e => {
@@ -122,7 +153,7 @@ input.addEventListener('keydown', e => {
 });
 
 // The popup for a request_download tool call: approve (optionally changing months) or decline.
-function downloadRequestCard(event) {
+function downloadRequestCard(event, chatId) {
   const card = el('div', 'download-card');
   const plan = event.plan;
   const head = el('div', 'download-card-head');
@@ -156,7 +187,7 @@ function downloadRequestCard(event) {
     approve.disabled = decline.disabled = from.disabled = to.disabled = recent.disabled = true;
     const response = await fetch('/api/chat/decision', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, request: event.id, approve: ok, start: from.value, end: to.value, recent: recent.checked }),
+      body: JSON.stringify({ conversation: chatId, request: event.id, approve: ok, start: from.value, end: to.value, recent: recent.checked }),
     });
     if (!response.ok) status.textContent = (await response.json()).error;
   };
@@ -195,7 +226,7 @@ function updateDownloadCard(card, event) {
 }
 
 // Approval card for installing a plugin that Creator mode built.
-function pluginInstallCard(event) {
+function pluginInstallCard(event, chatId) {
   const card = el('div', 'download-card install-card');
   card.dataset.request = event.id;
   card.append(el('div', 'download-card-head', `${event.replacing ? 'Update' : 'Install'} plugin “${event.plugin}”?`),
@@ -210,7 +241,7 @@ function pluginInstallCard(event) {
   const decide = async ok => {
     install.disabled = skip.disabled = true;
     await fetch('/api/chat/decision', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, request: event.id, approve: ok }) });
+      body: JSON.stringify({ conversation: chatId, request: event.id, approve: ok }) });
   };
   install.onclick = () => decide(true);
   skip.onclick = () => decide(false);
@@ -219,15 +250,59 @@ function pluginInstallCard(event) {
   return card;
 }
 
-async function ask(text) {
+// The logo (static/logo.svg) as a throbber: the bolts pop in left to right, the robot hops
+// and its eyes brighten with each one, then a shine sweeps across (option H in
+// design/throbber-options.html). It's inline so CSS can animate its parts; the mask repeats the shapes
+// so the shine only lights up what is showing.
+const LOGO_BOLT = 'M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z';
+let throbberCount = 0;
+
+function throbber() {
+  const id = `nb-shine-${++throbberCount}`;
+  // The shine's mask stays well inside the head's outline (which is only a pixel wide at 28px) and
+  // uses slightly smaller bolts (shrink < 1), so the shine never lights the edges.
+  const bolts = (fill, shrink = 1) => [['left', 28, 34, -32, 1.05], ['middle', 60, 26, 0, 1.25], ['right', 92, 34, 32, 1.05]]
+    .map(([k, x, y, r, s]) => `<g class="nb-bolt nb-bolt-${k}"><path d="${LOGO_BOLT}" transform="translate(${x} ${y}) rotate(${r}) scale(${s * shrink})" fill="${fill}"/></g>`)
+    .join('');
+  const wrap = el('span', 'throbber');
+  wrap.innerHTML = `<svg viewBox="0 0 120 120" aria-hidden="true">
+    <defs>
+      <linearGradient id="${id}-head" gradientUnits="userSpaceOnUse" x1="0" y1="52" x2="0" y2="108"><stop offset="0" stop-color="#64748b"/><stop offset="1" stop-color="#1e293b"/></linearGradient>
+      <linearGradient id="${id}-band"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".7"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+      <mask id="${id}-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
+        <rect x="28" y="58" width="64" height="44" rx="10" fill="#fff"/>${bolts('#fff', 0.88)}
+      </mask>
+    </defs>
+    <g class="nb-body">
+      <rect x="13" y="70" width="12" height="20" rx="4" fill="#334155"/>
+      <rect x="95" y="70" width="12" height="20" rx="4" fill="#334155"/>
+      <rect x="22" y="52" width="76" height="56" rx="16" fill="url(#${id}-head)" stroke="#475569" stroke-width="2"/>
+      <circle cx="44" cy="78" r="8" fill="#38bdf8"/><circle cx="76" cy="78" r="8" fill="#38bdf8"/>
+      <circle cx="46.5" cy="75.5" r="2.5" fill="#fff"/><circle cx="78.5" cy="75.5" r="2.5" fill="#fff"/>
+      <g class="nb-eye-dim" fill="url(#${id}-head)"><circle cx="44" cy="78" r="8.5"/><circle cx="76" cy="78" r="8.5"/></g>
+      <rect x="46" y="94" width="28" height="5" rx="2.5" fill="#38bdf8" opacity=".6"/>
+      ${bolts('#f59e0b')}
+      <g mask="url(#${id}-mask)"><g class="nb-shine"><rect x="-20" y="-10" width="40" height="140" transform="skewX(-20)" fill="url(#${id}-band)"/></g></g>
+    </g>
+  </svg>`;
+  return wrap;
+}
+
+// One chat turn in ``pane``: the user's text, then the reply as its UI events arrive. With
+// ``replay`` (redrawing a saved chat) nothing opens, downloads or waits for an answer.
+function renderTurn(text, pane, { replay = false } = {}) {
   const turn = el('div', 'turn');
   const reply = el('div', 'assistant');
   turn.append(el('div', 'user', text), reply);
-  log.append(turn);
-  const status = el('div', 'status', 'Thinking…');
+  pane.el.append(turn);
+  const shown = () => conversation === pane.id;
+  const waiting = value => { if (!replay && pane.waiting !== value) { pane.waiting = value; window.drawChatList?.(); } };
+  const status = el('div', 'status');
+  const label = el('span', '', 'Thinking…');
+  status.append(throbber(), label);
   reply.append(status);
   let segment = null, markdown = '';
-  const scroll = () => { log.scrollTop = log.scrollHeight; };
+  const scroll = () => { if (shown()) log.scrollTop = log.scrollHeight; };
   const place = node => { reply.insertBefore(node, status); scroll(); };
 
   function handle(event) {
@@ -249,9 +324,10 @@ async function ask(text) {
       case 'tool':
       case 'tool_running':
         segment = null;
-        status.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
+        label.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           create_report: 'Building the report (re-running its queries)…',
+          create_document: 'Writing the document…',
           inspect_runtime: 'Inspecting the app…', list_plugin_files: 'Reading the plugin draft…',
           read_plugin_file: 'Reading a plugin file…', write_plugin_file: 'Writing a plugin file…',
           delete_plugin_file: 'Deleting a plugin file…', test_plugin: 'Testing the plugin in a separate process…',
@@ -293,8 +369,11 @@ async function ask(text) {
         place(box);
         break;
       }
-      case 'plugin_install_request': place(pluginInstallCard(event)); status.textContent = 'Waiting for your answer…'; segment = null; break;
+      case 'plugin_install_request':
+        place(pluginInstallCard(event, pane.id)); label.textContent = 'Waiting for your answer…'; segment = null; waiting(true);
+        break;
       case 'plugin_install_result': {
+        waiting(false);
         segment = null;
         const card = reply.querySelector(`.install-card[data-request="${CSS.escape(event.id)}"]`);
         const target = card ? card.querySelector('.install-status') : null;
@@ -311,7 +390,7 @@ async function ask(text) {
         else nodes.forEach(place);
         break;
       }
-      case 'notice': status.textContent = event.message; break;
+      case 'notice': label.textContent = event.message; break;
       case 'report': {
         segment = null;
         const card = el('div', 'report-card');
@@ -320,63 +399,88 @@ async function ask(text) {
         place(card);
         break;
       }
+      case 'document': {
+        segment = null;
+        const card = el('div', 'report-card');
+        const open = el('a', '', 'Open beside chat'); open.href = '#chat';
+        open.onclick = e => { e.preventDefault(); openDocBeside(event.id); };
+        const full = el('a', '', 'Full page ↗'); full.href = `#docs/${event.id}`;
+        const links = el('span', 'report-links'); links.append(open, full);
+        card.append(el('span', 'report-icon', '📝'), el('b', '', event.title), el('span', 'muted', ' shared document'), links);
+        place(card);
+        if (!replay && shown()) openDocBeside(event.id);
+        break;
+      }
       case 'download_request':
         segment = null;
-        place(downloadRequestCard(event));
-        status.textContent = 'Waiting for your answer…';
+        place(downloadRequestCard(event, pane.id));
+        label.textContent = 'Waiting for your answer…';
+        waiting(true);
         break;
       case 'download_started':
-        refreshJobs();
+        if (!replay) refreshJobs();
         // falls through
       case 'download_progress':
       case 'download_finished':
       case 'download_declined': {
+        waiting(false);
         const card = reply.querySelector(`.download-card[data-request="${CSS.escape(event.id)}"]`);
         if (card) updateDownloadCard(card, event);
-        status.textContent = event.type === 'download_progress' || event.type === 'download_started' ? 'Downloading…' : 'Thinking…';
+        label.textContent = event.type === 'download_progress' || event.type === 'download_started' ? 'Downloading…' : 'Thinking…';
         break;
       }
       case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
+      case 'chat_title': renameChatInList(event.id, event.title); break;
     }
   }
 
+  function finish() {
+    status.remove();
+    // Approval cards from a saved chat can't be answered any more.
+    if (replay) reply.querySelectorAll('.download-card .buttons button').forEach(b => { b.disabled = true; });
+  }
+  return { handle, finish };
+}
+
+async function ask(text) {
+  const pane = currentPane();
+  pane.busy = true;
+  pane.webSearch = webSearch.checked;
+  pane.firstText ||= text;
+  send.disabled = true;
+  const { handle, finish } = renderTurn(text, pane);
+  history.replaceState(null, '', `#chat/${pane.id}`);  // the chat has an address from its first message
+  window.drawChatList?.();
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation, message: text, model: currentModel && currentModel.ref, web_search: webSearch.checked, mode: chatMode }),
+      body: JSON.stringify({ conversation: pane.id, message: text, model: currentModel && currentModel.ref,
+        web_search: pane.webSearch, mode: pane.mode }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error || `HTTP ${response.status}`);
     }
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-    let buffer = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += value;
-      let cut;
-      while ((cut = buffer.indexOf('\n\n')) >= 0) {
-        const line = buffer.slice(0, cut);
-        buffer = buffer.slice(cut + 2);
-        if (line.startsWith('data: ')) handle(JSON.parse(line.slice(6)));
-      }
-    }
+    await streamEvents(response, handle);
   } catch (err) {
     handle({ type: 'error', message: err.message });
   } finally {
-    status.remove();
+    finish();
+    pane.busy = pane.waiting = false;
+    if (conversation === pane.id) send.disabled = false;
+    else { pane.el.remove(); panes.delete(pane.id); }  // reopening replays the saved chat
+    refreshChatList();
   }
 }
 
 form.addEventListener('submit', async e => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text || send.disabled) return;
+  if (!text || currentPane().busy) return;
   input.value = '';
-  send.disabled = true;
-  try { await ask(text); } finally { send.disabled = false; input.focus(); }
+  await ask(text);
+  if (currentPane()?.id && !currentPane().busy) input.focus();
 });
 
 // Used by other views (e.g. the explorer's "Ask the chat" button).

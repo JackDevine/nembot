@@ -1,3 +1,5 @@
+<img src="src/nembot/static/logo.svg" alt="nembot logo: a robot head with three lightning bolts" width="96">
+
 # nembot
 
 Load public AEMO MMS data into a local DuckDB database.

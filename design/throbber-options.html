@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>nembot — throbber options</title>
+<style>
+  body { margin: 0; padding: 32px; font: 14px/1.5 system-ui, sans-serif; color: #0f172a; background: #f1f5f9; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  p.lead { margin: 0 0 12px; color: #64748b; }
+  .controls { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; }
+  .controls select, .controls button { font: inherit; padding: 4px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; cursor: pointer; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; }
+  .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; }
+  .card h2 { margin: 0; font-size: 16px; }
+  .card .note { margin: 2px 0 14px; color: #64748b; min-height: 42px; }
+  .row { display: flex; gap: 12px; margin-bottom: 12px; }
+  .tile { flex: 1; display: flex; align-items: center; justify-content: center; border-radius: 10px; padding: 14px; }
+  .light { background: #fff; border: 1px solid #e2e8f0; color: #656d76; }
+  .dark { background: #181c1a; color: #aab2af; }
+  .big .throbber svg { width: 120px; height: 120px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; justify-content: flex-start; }
+  .tag { font-size: 11px; font-weight: 600; color: #0880ea; border: 1px solid #0880ea; border-radius: 10px; padding: 0 6px; margin-left: 6px; vertical-align: 2px; }
+
+  /* ---- Throbbers ---- */
+  .throbber { display: inline-flex; flex-shrink: 0; --cycle: 2.8s; }
+  .throbber svg { width: 28px; height: 28px; overflow: visible; }
+  .nb-body { transform-box: view-box; transform-origin: 60px 80px; }
+  .nb-bolt { transform-box: fill-box; transform-origin: 50% 100%; animation: var(--cycle) ease-out infinite both; }
+  .nb-bolt-left { animation-name: nb-bolt-left; }
+  .nb-bolt-middle { animation-name: nb-bolt-middle; }
+  .nb-bolt-right { animation-name: nb-bolt-right; }
+  .nb-shine { animation: nb-shine var(--cycle) ease-in-out infinite; }
+  .nb-eye-dim { opacity: 0; }
+
+  /* A: the app's current throbber. Bolts pop in, then the shine. */
+  @keyframes nb-bolt-left { 0%, 8% { transform: scale(0); opacity: 0; } 15% { transform: scale(1.25); opacity: 1; } 20%, 88% { transform: scale(1); opacity: 1; } 96%, 100% { transform: scale(1); opacity: 0; } }
+  @keyframes nb-bolt-middle { 0%, 26% { transform: scale(0); opacity: 0; } 33% { transform: scale(1.25); opacity: 1; } 38%, 88% { transform: scale(1); opacity: 1; } 96%, 100% { transform: scale(1); opacity: 0; } }
+  @keyframes nb-bolt-right { 0%, 44% { transform: scale(0); opacity: 0; } 51% { transform: scale(1.25); opacity: 1; } 56%, 88% { transform: scale(1); opacity: 1; } 96%, 100% { transform: scale(1); opacity: 0; } }
+  @keyframes nb-shine { 0%, 55% { transform: translateX(0); } 90%, 100% { transform: translateX(160px); } }
+
+  /* B: the shine travels with the bolts, reaching each one as it pops. */
+  .v-sync .nb-shine { animation-name: nb-shine-sync; animation-timing-function: linear; }
+  @keyframes nb-shine-sync { 0% { transform: translateX(16px); } 81%, 100% { transform: translateX(160px); } }
+
+  /* C: bolts pop in, then the robot shrinks to nothing and grows back. */
+  .v-shrink { --cycle: 3.2s; }
+  .v-shrink .nb-bolt-left { animation-name: nb-c-left; }
+  .v-shrink .nb-bolt-middle { animation-name: nb-c-middle; }
+  .v-shrink .nb-bolt-right { animation-name: nb-c-right; }
+  .v-shrink .nb-body { animation: nb-shrink var(--cycle) ease-in-out infinite; }
+  .v-shrink .nb-shine { display: none; }
+  @keyframes nb-c-left { 0%, 8% { transform: scale(0); opacity: 0; } 14% { transform: scale(1.25); opacity: 1; } 18%, 72% { transform: scale(1); opacity: 1; } 74%, 100% { transform: scale(0); opacity: 0; } }
+  @keyframes nb-c-middle { 0%, 22% { transform: scale(0); opacity: 0; } 28% { transform: scale(1.25); opacity: 1; } 32%, 72% { transform: scale(1); opacity: 1; } 74%, 100% { transform: scale(0); opacity: 0; } }
+  @keyframes nb-c-right { 0%, 36% { transform: scale(0); opacity: 0; } 42% { transform: scale(1.25); opacity: 1; } 46%, 72% { transform: scale(1); opacity: 1; } 74%, 100% { transform: scale(0); opacity: 0; } }
+  @keyframes nb-shrink { 0%, 60% { transform: scale(1); } 72%, 76% { transform: scale(0); } 88% { transform: scale(1.12); } 94%, 100% { transform: scale(1); } }
+
+  /* D: C plus the shine, which sweeps after the last bolt and before the shrink. */
+  .v-shrink-shine { --cycle: 3.2s; }
+  .v-shrink-shine .nb-bolt-left { animation-name: nb-c-left; }
+  .v-shrink-shine .nb-bolt-middle { animation-name: nb-c-middle; }
+  .v-shrink-shine .nb-bolt-right { animation-name: nb-c-right; }
+  .v-shrink-shine .nb-body { animation: nb-shrink var(--cycle) ease-in-out infinite; }
+  .v-shrink-shine .nb-shine { animation-name: nb-shine-d; }
+  @keyframes nb-shine-d { 0%, 45% { transform: translateX(0); } 59%, 100% { transform: translateX(160px); } }
+
+  /* E: once all three are up, the bolts flicker like a live current. */
+  .v-flicker .nb-shine { display: none; }
+  .v-flicker .nb-bolt path { animation: nb-flicker var(--cycle) linear infinite; }
+  .v-flicker .nb-bolt-middle path { animation-delay: -.09s; }
+  .v-flicker .nb-bolt-right path { animation-delay: -.17s; }
+  @keyframes nb-flicker { 0%, 58% { opacity: 1; } 60% { opacity: .25; } 62% { opacity: 1; } 66% { opacity: .5; } 68% { opacity: 1; } 72% { opacity: .2; } 73% { opacity: 1; } 78% { opacity: .6; } 80%, 100% { opacity: 1; } }
+
+  /* F: the eyes start dim and brighten with each bolt, then the shine. */
+  .v-charge .nb-eye-dim { animation: nb-charge var(--cycle) ease-out infinite; }
+  @keyframes nb-charge { 0%, 12% { opacity: .8; } 16%, 30% { opacity: .55; } 34%, 48% { opacity: .3; } 52%, 88% { opacity: 0; } 96%, 100% { opacity: .8; } }
+
+  /* G: the robot hops each time a bolt pops, then the shine. */
+  .v-hop .nb-body { animation: nb-hop var(--cycle) ease-out infinite; }
+  @keyframes nb-hop { 0%, 9%, 27%, 45% { transform: translateY(0); } 12%, 30%, 48% { transform: translateY(-7px); } 17%, 35%, 53%, 100% { transform: translateY(0); } }
+
+  /* H: G and F together: the robot hops and its eyes brighten with each bolt, then the shine. */
+  .v-hop-charge .nb-body { animation: nb-hop var(--cycle) ease-out infinite; }
+  .v-hop-charge .nb-eye-dim { animation: nb-charge var(--cycle) ease-out infinite; }
+
+  @media (prefers-reduced-motion: reduce) { .throbber * { animation: none !important; } }
+</style>
+</head>
+<body>
+<h1>nembot — throbber candidates</h1>
+<p class="lead">Each one loops forever. It's shown large, and at its real size next to the chat status text, on the app's light and dark backgrounds.</p>
+<div class="controls">
+  <label>Speed <select id="speed"><option value="1.5">1.5×</option><option value="1.25">1.25×</option><option value="1" selected>1×</option><option value="0.5">0.5×</option><option value="0.25">0.25×</option></select></label>
+  <button id="restart" type="button">Restart all in sync</button>
+</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const BOLT = 'M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z';
+let count = 0;
+
+function throbber() {
+  const id = `shine-${++count}`;
+  // The shine's mask stays well inside the head's outline (which is only a pixel wide at 28px) and
+  // uses slightly smaller bolts (shrink < 1), so the shine never lights the edges.
+  const bolts = (fill, shrink = 1) => [['left', 28, 34, -32, 1.05], ['middle', 60, 26, 0, 1.25], ['right', 92, 34, 32, 1.05]]
+    .map(([k, x, y, r, s]) => `<g class="nb-bolt nb-bolt-${k}"><path d="${BOLT}" transform="translate(${x} ${y}) rotate(${r}) scale(${s * shrink})" fill="${fill}"/></g>`)
+    .join('');
+  return `<span class="throbber"><svg viewBox="0 0 120 120" aria-hidden="true">
+    <defs>
+      <linearGradient id="${id}-head" gradientUnits="userSpaceOnUse" x1="0" y1="52" x2="0" y2="108"><stop offset="0" stop-color="#64748b"/><stop offset="1" stop-color="#1e293b"/></linearGradient>
+      <linearGradient id="${id}-band"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".7"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+      <mask id="${id}-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
+        <rect x="28" y="58" width="64" height="44" rx="10" fill="#fff"/>${bolts('#fff', 0.88)}
+      </mask>
+    </defs>
+    <g class="nb-body">
+      <rect x="13" y="70" width="12" height="20" rx="4" fill="#334155"/>
+      <rect x="95" y="70" width="12" height="20" rx="4" fill="#334155"/>
+      <rect x="22" y="52" width="76" height="56" rx="16" fill="url(#${id}-head)" stroke="#475569" stroke-width="2"/>
+      <circle cx="44" cy="78" r="8" fill="#38bdf8"/><circle cx="76" cy="78" r="8" fill="#38bdf8"/>
+      <circle cx="46.5" cy="75.5" r="2.5" fill="#fff"/><circle cx="78.5" cy="75.5" r="2.5" fill="#fff"/>
+      <g class="nb-eye-dim" fill="url(#${id}-head)"><circle cx="44" cy="78" r="8.5"/><circle cx="76" cy="78" r="8.5"/></g>
+      <rect x="46" y="94" width="28" height="5" rx="2.5" fill="#38bdf8" opacity=".6"/>
+      ${bolts('#f59e0b')}
+      <g mask="url(#${id}-mask)"><g class="nb-shine"><rect x="-20" y="-10" width="40" height="140" transform="skewX(-20)" fill="url(#${id}-band)"/></g></g>
+    </g>
+  </svg></span>`;
+}
+
+const OPTIONS = [
+  { cls: 'v-current', name: 'A — Pop, then shine', current: true,
+    note: 'In the app now. The bolts pop in left to right, then a shine sweeps across.' },
+  { cls: 'v-sync', name: 'B — Shine with the bolts',
+    note: 'The shine sweeps left to right while the bolts pop, reaching each bolt as it appears.' },
+  { cls: 'v-shrink', name: 'C — Pop, shrink, regrow',
+    note: 'After all three bolts are up, the robot shrinks to nothing and grows back with a small overshoot (no shine).' },
+  { cls: 'v-shrink-shine', name: 'D — Pop, shine, shrink, regrow',
+    note: 'C with the shine added between the last bolt and the shrink.' },
+  { cls: 'v-flicker', name: 'E — Flicker',
+    note: 'The bolts pop in, then flicker out of step like a live current (no shine).' },
+  { cls: 'v-charge', name: 'F — Charge up',
+    note: 'The eyes start dim and brighten with each bolt, then the shine.' },
+  { cls: 'v-hop', name: 'G — Hop',
+    note: 'The robot hops a little each time a bolt pops, then the shine.' },
+  { cls: 'v-hop-charge', name: 'H — Hop and charge up',
+    note: 'G and F together: with each bolt the robot hops and its eyes get brighter, then the shine.' },
+];
+
+const grid = document.getElementById('grid');
+for (const o of OPTIONS) {
+  const card = document.createElement('div');
+  card.className = `card ${o.cls}`;
+  card.innerHTML = `
+    <h2>${o.name}${o.current ? '<span class="tag">current</span>' : ''}</h2>
+    <p class="note">${o.note}</p>
+    <div class="row">
+      <div class="tile light big">${throbber()}</div>
+      <div class="tile dark big">${throbber()}</div>
+    </div>
+    <div class="row">
+      <div class="tile light status">${throbber()}<span>Thinking…</span></div>
+      <div class="tile dark status">${throbber()}<span>Running query…</span></div>
+    </div>`;
+  grid.appendChild(card);
+}
+
+const animations = () => document.getAnimations();
+document.getElementById('speed').onchange = e => animations().forEach(a => { a.playbackRate = Number(e.target.value); });
+document.getElementById('restart').onclick = () => animations().forEach(a => { a.currentTime = 0; a.play(); });
+</script>
+</body>
+</html>

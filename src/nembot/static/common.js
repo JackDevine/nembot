@@ -43,8 +43,15 @@ function sqlBlock(title, sql) { return details(title, el('pre', '', sql)); }
 // Models write "~$370/MWh" for approximations; GFM would read paired single
 // tildes as strikethrough, so keep strikethrough to the explicit ~~ form.
 function renderMarkdown(text) {
-  return DOMPurify.sanitize(marked.parse(text.replace(/(^|[^~\\])~(?!~)/g, '$1\\~')));
+  return DOMPurify.sanitize(marked.parse(escapeTildes(text)));
 }
+
+// The same for text that goes inside an existing paragraph (no <p> wrapper).
+function renderInlineMarkdown(text) {
+  return DOMPurify.sanitize(marked.parseInline(escapeTildes(text)));
+}
+
+function escapeTildes(text) { return text.replace(/(^|[^~\\])~(?!~)/g, '$1\\~'); }
 
 // ``actions`` (optional) is an element placed next to the SQL, e.g. an "Add to snippets" button.
 function renderTable(event, actions) {
@@ -104,7 +111,31 @@ function renderPlot(event, actions) {
   wrap.append(withActions(sqlBlock('Plot SQL', event.sql), actions, event.result_id), details('Plot specification', spec));
   const target = el('div');
   wrap.append(target);
-  vegaEmbed(target, event.spec, { actions: { export: true, source: false, compiled: false, editor: false } })
-    .catch(err => target.append(el('div', 'error', `Plot failed to render: ${err}`)));
+  embedChart(target, event.spec);
   return wrap;
+}
+
+// A Vega-Lite chart in the page's light or dark theme.
+function embedChart(target, spec) {
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  return vegaEmbed(target, spec, { actions: { export: true, source: false, compiled: false, editor: false },
+    ...(dark && { theme: 'dark', config: { background: 'transparent' } }) })
+    .catch(err => target.append(el('div', 'error', `Plot failed to render: ${err}`)));
+}
+
+// Read a server-sent event stream of JSON `data:` lines, calling handle(event) for each.
+async function streamEvents(response, handle) {
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += value;
+    let cut;
+    while ((cut = buffer.indexOf('\n\n')) >= 0) {
+      const line = buffer.slice(0, cut);
+      buffer = buffer.slice(cut + 2);
+      if (line.startsWith('data: ')) handle(JSON.parse(line.slice(6)));
+    }
+  }
 }

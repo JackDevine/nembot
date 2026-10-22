@@ -6,7 +6,7 @@ const explorer = {
   current: null,       // name of the open table
   detail: null,        // /api/explorer/tables/<name> response
   query: null,         // data-view filters and paging
-  docsOpen: localStorage.getItem('docsOpen') === 'yes',
+  docsExpanded: new Set(),  // tables whose docs are shown in full
 };
 const packageList = document.getElementById('package-list');
 const tableView = document.getElementById('table-view');
@@ -124,7 +124,29 @@ function docsPanel(detail) {
   const src = el('div', 'doc-source', `Package ${detail.package}. From the ${detail.source.title} v${detail.source.version} (${formatDate(detail.source.date)}), `);
   src.append(sourceLink(detail.source, 'full report PDF ↗'));
   panel.append(src);
-  return panel;
+
+  // A clipped preview with a See more / See less toggle, remembered per table.
+  const box = el('div', 'docs-box');
+  const more = el('button', 'link-like docs-more');
+  const show = expanded => {
+    box.classList.toggle('expanded', expanded);
+    more.textContent = expanded ? 'See less' : 'See more';
+  };
+  more.type = 'button';
+  more.onclick = () => {
+    const expanded = !explorer.docsExpanded.has(detail.name);
+    if (expanded) explorer.docsExpanded.add(detail.name);
+    else explorer.docsExpanded.delete(detail.name);
+    show(expanded);
+    if (!expanded && box.getBoundingClientRect().top < 0) box.scrollIntoView({ block: 'start' });
+  };
+  show(explorer.docsExpanded.has(detail.name));
+  box.append(panel, more);
+  // Short docs fit in the preview and need no toggle.
+  requestAnimationFrame(() => {
+    if (!box.classList.contains('expanded') && panel.scrollHeight <= panel.clientHeight) box.classList.add('short');
+  });
+  return box;
 }
 
 function columnTooltip(th, column, isKey) {
@@ -144,20 +166,13 @@ function drawTable() {
   const d = explorer.detail;
   tableView.replaceChildren();
   const title = el('div', 'title-row');
-  const help = el('button', 'help-button' + (explorer.docsOpen ? ' active' : ''), '?');
-  help.title = 'Show the full table documentation';
-  help.onclick = () => {
-    explorer.docsOpen = !explorer.docsOpen;
-    localStorage.setItem('docsOpen', explorer.docsOpen ? 'yes' : 'no');
-    drawTable();
-  };
   const ask = el('button', '', 'Ask the chat about this table');
   ask.onclick = () => askAbout(d.downloaded
     ? `Using the ${d.name} table, give me an overview of what it contains and one interesting insight from the data.`
     : `What does the ${d.name} table contain, and what questions could it help me answer?`);
   title.append(el('h2', '', d.name), el('span', 'badge', KIND_LABELS[d.kind]),
     el('span', d.downloaded ? 'badge ok' : 'badge missing', d.downloaded ? 'downloaded' : 'not downloaded'),
-    el('span', 'spacer'), el('span', 'actions'), ask, help);
+    el('span', 'spacer'), el('span', 'actions'), ask);
   tableView.append(title, el('p', 'comment', d.comment));
   drawActions(d, title.querySelector('.actions'));
 
@@ -173,11 +188,10 @@ function drawTable() {
   }
   tableView.append(facts, el('div', 'job-slot'));
   drawJobSlot();
-  if (explorer.docsOpen) tableView.append(docsPanel(d));
+  tableView.append(docsPanel(d));
 
   if (!d.downloaded) {
     tableView.append(el('p', 'empty', 'This table has not been downloaded yet. Use Download… to choose which months to fetch from AEMO.'));
-    if (!explorer.docsOpen) tableView.append(el('h3', '', 'Columns'), columnsTable(d));
     return;
   }
   explorer.grid = dataGrid(d);

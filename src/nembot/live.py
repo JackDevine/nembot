@@ -145,8 +145,8 @@ def load(db: duckdb.DuckDBPyConnection, table: str, files: list[dict], cache_dir
     c = db.cursor()
     downloads = None
     try:
-        c.execute('CREATE SCHEMA IF NOT EXISTS _nemsplainer')
-        c.execute('CREATE TABLE IF NOT EXISTS _nemsplainer.files (url VARCHAR, sha256 VARCHAR, table_name VARCHAR, window_start TIMESTAMP, window_end TIMESTAMP, processed_at TIMESTAMP, PRIMARY KEY(url,sha256,table_name,window_start,window_end))')
+        c.execute('CREATE SCHEMA IF NOT EXISTS _nembot')
+        c.execute('CREATE TABLE IF NOT EXISTS _nembot.files (url VARCHAR, sha256 VARCHAR, table_name VARCHAR, window_start TIMESTAMP, window_end TIMESTAMP, processed_at TIMESTAMP, PRIMARY KEY(url,sha256,table_name,window_start,window_end))')
         _create_table(c, schema, table)
         current = {}
 

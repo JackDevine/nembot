@@ -102,7 +102,7 @@ class OpenRouterProvider:
             if not key:
                 raise RuntimeError('OPENROUTER_API_KEY is not set.')
             self._client = openai.AsyncOpenAI(base_url=BASE_URL, api_key=key,
-                                              default_headers={'X-Title': 'nemsplainer'})
+                                              default_headers={'X-Title': 'nembot'})
         return self._client
 
     async def complete(self, model: ModelInfo, prompt: str) -> str:

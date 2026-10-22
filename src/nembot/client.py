@@ -21,7 +21,7 @@ def parquet_bytes(connection: duckdb.DuckDBPyConnection, sql: str) -> bytes:
     statements = connection.extract_statements(sql)
     if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
         raise ValueError('Only one SELECT query is allowed.')
-    with tempfile.TemporaryDirectory(prefix='nemsplainer-query-') as directory:
+    with tempfile.TemporaryDirectory(prefix='nembot-query-') as directory:
         path = Path(directory) / 'result.parquet'
         connection.execute(f"COPY ({sql.strip().rstrip(';')}) TO '{path}' (FORMAT parquet)")
         return path.read_bytes()

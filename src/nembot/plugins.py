@@ -5,7 +5,7 @@ A plugin is a folder in the plugins directory (default ``plugins/``):
 - ``plugin.toml`` (required): ``name``, ``title``, ``description``, ``version``.
 - ``plugin.py`` (optional): ``def setup(nem): ...`` registers tools, routes and
   a short prompt note through the :class:`Context` passed as ``nem``.
-- ``client.js`` (optional): browser code using the ``nemsplainer`` API object
+- ``client.js`` (optional): browser code using the ``nembot`` API object
   (tabs, chat event renderers, result actions); see ``static/plugins.js``.
 - ``style.css`` (optional): extra styles.
 
@@ -59,7 +59,7 @@ class Context:
     log: logging.Logger = None
 
     def __post_init__(self):
-        self.log = logging.getLogger(f'nemsplainer.plugin.{self.name}')
+        self.log = logging.getLogger(f'nembot.plugin.{self.name}')
 
     @property
     def data_dir(self) -> Path:
@@ -145,7 +145,7 @@ def load_plugin(directory: Path, query: Callable) -> Plugin:
         context = Context(directory.name, directory, query)
         source = directory / 'plugin.py'
         if source.exists():
-            module_name = f'nemsplainer_plugin_{directory.name.replace("-", "_")}_{next(_modules)}'
+            module_name = f'nembot_plugin_{directory.name.replace("-", "_")}_{next(_modules)}'
             spec = importlib.util.spec_from_file_location(module_name, source)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)

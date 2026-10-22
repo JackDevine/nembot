@@ -1,11 +1,11 @@
-// Plugin runtime in the page: the `nemsplainer` API each plugin's client.js receives,
+// Plugin runtime in the page: the `nembot` API each plugin's client.js receives,
 // the loader for installed plugins, plugin tabs, and the Plugins management page.
 
 const pluginRegistry = { tabs: [], chatEvents: {}, resultActions: [], plugins: [] };
 const pluginView = document.getElementById('plugin-view');
 const pluginsPage = document.getElementById('plugins-page');
 
-window.nemsplainer = {
+window.nembot = {
   // Called by the server-side wrapper around each plugin's client.js.
   definePlugin(name, body) {
     const base = `/plugins/${encodeURIComponent(name)}`;
@@ -126,7 +126,7 @@ async function showPluginsPage() {
   }
   pluginsPage.append(el('p', 'muted acknowledgement',
     'The plugin system and Creator mode are modelled on DeepSeek Harness. Plugins run on your computer with ' +
-    "nemsplainer's permissions, so only install plugins you trust; Creator mode asks before installing."));
+    "nembot's permissions, so only install plugins you trust; Creator mode asks before installing."));
 }
 
 loadPlugins();

@@ -1,4 +1,4 @@
-"""Example nemsplainer plugin: a chat tool, an HTTP route and (in client.js) a tab."""
+"""Example nembot plugin: a chat tool, an HTTP route and (in client.js) a tab."""
 
 REGIONS = {'NSW1', 'QLD1', 'SA1', 'TAS1', 'VIC1'}
 

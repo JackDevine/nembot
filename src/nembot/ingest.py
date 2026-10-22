@@ -153,11 +153,11 @@ def _merge(c, table, target, csv_path, supplied, context):
 
 
 def _completed(c, name, url, digest, lower, upper):
-    return c.execute('SELECT 1 FROM _nemsplainer.files WHERE url=? AND sha256=? AND table_name=? AND window_start=? AND window_end=?', [url, digest, name, lower, upper]).fetchone() is not None
+    return c.execute('SELECT 1 FROM _nembot.files WHERE url=? AND sha256=? AND table_name=? AND window_start=? AND window_end=?', [url, digest, name, lower, upper]).fetchone() is not None
 
 
 def _mark(c, name, url, digest, lower, upper):
-    c.execute('INSERT INTO _nemsplainer.files VALUES (?, ?, ?, ?, ?, current_timestamp) ON CONFLICT DO NOTHING', [url, digest, name, lower, upper])
+    c.execute('INSERT INTO _nembot.files VALUES (?, ?, ?, ?, ?, current_timestamp) ON CONFLICT DO NOTHING', [url, digest, name, lower, upper])
 
 
 def _load_file(c, table, target, path, directory, url, lower=None, upper=None, required=True):
@@ -244,8 +244,8 @@ def load_mms(
     try:
         c.execute("SET memory_limit='2GB'")
         c.execute('SET threads=4')
-        c.execute('CREATE SCHEMA IF NOT EXISTS _nemsplainer')
-        c.execute('CREATE TABLE IF NOT EXISTS _nemsplainer.files (url VARCHAR, sha256 VARCHAR, table_name VARCHAR, window_start TIMESTAMP, window_end TIMESTAMP, processed_at TIMESTAMP, PRIMARY KEY(url,sha256,table_name,window_start,window_end))')
+        c.execute('CREATE SCHEMA IF NOT EXISTS _nembot')
+        c.execute('CREATE TABLE IF NOT EXISTS _nembot.files (url VARCHAR, sha256 VARCHAR, table_name VARCHAR, window_start TIMESTAMP, window_end TIMESTAMP, processed_at TIMESTAMP, PRIMARY KEY(url,sha256,table_name,window_start,window_end))')
         for name in names:
             _create_table(c, TABLES[name])
         references = []

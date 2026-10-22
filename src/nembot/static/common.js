@@ -55,7 +55,7 @@ function renderTable(event, actions) {
     columns: event.columns.map(name => ({ name })),
     rows: event.rows,
     total: event.total,
-    exportName: event.result_id ? `nemsplainer-${event.result_id}` : 'nemsplainer-table',
+    exportName: event.result_id ? `nembot-${event.result_id}` : 'nembot-table',
   }));
   return wrap;
 }

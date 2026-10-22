@@ -42,10 +42,10 @@ ROOT = 'https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/'
 #   Repeated 403s stop the run instead of retrying around a block.
 # - Listings are cached for an hour and ZIPs forever, so reruns cost NEMWEB
 #   almost nothing.
-USER_AGENT = 'nemsplainer/0.1 (personal NEM analysis tool; <=3 connections, adaptive rate limit, cached downloads)'
+USER_AGENT = 'nembot/0.1 (personal NEM analysis tool; <=3 connections, adaptive rate limit, cached downloads)'
 MAX_CONCURRENCY = 3
-CONCURRENCY = max(1, min(MAX_CONCURRENCY, int(os.environ.get('NEMSPLAINER_CONCURRENCY', '2'))))
-REQUEST_INTERVAL = float(os.environ.get('NEMSPLAINER_REQUEST_INTERVAL', '0'))  # optional minimum gap between requests
+CONCURRENCY = max(1, min(MAX_CONCURRENCY, int(os.environ.get('NEMBOT_CONCURRENCY', '2'))))
+REQUEST_INTERVAL = float(os.environ.get('NEMBOT_REQUEST_INTERVAL', '0'))  # optional minimum gap between requests
 MAX_DELAY = 30.0
 RECOVER_AFTER = 20      # successes before allowing one more concurrent request after an error
 FORBIDDEN_LIMIT = 3     # consecutive 403s before giving up

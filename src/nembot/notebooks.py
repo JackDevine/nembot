@@ -47,7 +47,7 @@ class NotebookServers:
             self.directory.mkdir(parents=True, exist_ok=True)
             port, token = _free_port(), secrets.token_urlsafe(16)
             log = (self.directory / f'.{kind}.log').open('ab')
-            env = {**os.environ, 'NEMSPLAINER_URL': self.app_url}
+            env = {**os.environ, 'NEMBOT_URL': self.app_url}
             process = subprocess.Popen(self._command(kind, port, token), stdout=log, stderr=subprocess.STDOUT,
                                        stdin=subprocess.DEVNULL, env=env, cwd=self.directory)
             self.servers[kind] = (process, port, token)

@@ -8,8 +8,8 @@ import zipfile
 
 import duckdb
 
-from nemsplainer import reports
-from nemsplainer.client import parquet_bytes
+from nembot import reports
+from nembot.client import parquet_bytes
 
 SPEC = {'mark': 'line', 'encoding': {'x': {'field': 'x', 'type': 'quantitative'},
                                      'y': {'field': 'y', 'type': 'quantitative'}}, 'width': 400, 'height': 200}
@@ -46,7 +46,7 @@ class Export(unittest.TestCase):
         self.assertEqual(sorted(r['format'] for r in listed), sorted(reports.FORMATS))
 
     def test_every_export_credits_aemo(self):
-        from nemsplainer.attribution import CREDIT
+        from nembot.attribution import CREDIT
         for fmt in reports.FORMATS:
             _, data = self.export(fmt)
             if fmt in ('docx', 'pptx', 'xlsx'):
@@ -81,7 +81,7 @@ class Export(unittest.TestCase):
         _, data = self.export('jupyter')
         notebook = json.loads(data)
         code = '\n'.join(''.join(c['source']) for c in notebook['cells'] if c['cell_type'] == 'code')
-        self.assertIn('from nemsplainer.client import query', code)
+        self.assertIn('from nembot.client import query', code)
         self.assertIn("url='http://127.0.0.1:1'", code)
         self.assertIn('validate=False', code)
         markdown = ''.join(''.join(c['source']) for c in notebook['cells'] if c['cell_type'] == 'markdown')

@@ -1,4 +1,4 @@
-"""How nemsplainer credits AEMO, its data source.
+"""How nembot credits AEMO, its data source.
 
 AEMO's Copyright Permissions allow use of AEMO material for any purpose with
 accurate attribution to AEMO as author. Some older AEMO documents are stricter
@@ -8,5 +8,5 @@ accurate attribution to AEMO as author. Some older AEMO documents are stricter
 COPYRIGHT_URL = 'https://www.aemo.com.au/privacy-and-legal-notices/copyright-permissions'
 
 CREDIT = ('Contains data from the Australian Energy Market Operator (AEMO), published on NEMWEB, used under '
-          f"AEMO's Copyright Permissions ({COPYRIGHT_URL.removeprefix('https://www.')}). Processed by nemsplainer; "
+          f"AEMO's Copyright Permissions ({COPYRIGHT_URL.removeprefix('https://www.')}). Processed by nembot; "
           'not endorsed by AEMO. AEMO gives no warranty of accuracy, completeness or currency; use at your own risk.')

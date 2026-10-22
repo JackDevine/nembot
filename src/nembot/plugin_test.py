@@ -1,6 +1,6 @@
 """Test a plugin draft in a separate process and print a JSON report.
 
-Usage: python -I -m nemsplainer.plugin_test DRAFT_DIR --app-url URL --database PATH
+Usage: python -I -m nembot.plugin_test DRAFT_DIR --app-url URL --database PATH
            [--tool NAME --args JSON] [--route PATH]
 
 Creator mode runs this with a timeout, so a broken or hanging draft can't take

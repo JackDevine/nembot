@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from nemsplainer.cli import main
+from nembot.cli import main
 
 
 class ConfigErrors(unittest.TestCase):
@@ -18,13 +18,13 @@ class ConfigErrors(unittest.TestCase):
             for contents in ('watch = true', 'tables = "DISPATCHPRICE"', 'start = 2026-08-01T12:00:00', 'database = 9', 'start = "broken"', 'tables = ['):
                 with self.subTest(contents=contents):
                     config.write_text(contents)
-                    with patch.object(sys, 'argv', ['nemsplainer', '--config', str(config), '--database', str(database)]), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+                    with patch.object(sys, 'argv', ['nembot', '--config', str(config), '--database', str(database)]), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
                         main()
                     self.assertEqual(result.exception.code, 2)
                     self.assertFalse(database.exists())
 
     def test_no_watch_flag_exists(self):
-        with patch.object(sys, 'argv', ['nemsplainer', '--watch']), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+        with patch.object(sys, 'argv', ['nembot', '--watch']), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
             main()
         self.assertEqual(result.exception.code, 2)
 
@@ -32,7 +32,7 @@ class ConfigLoad(unittest.TestCase):
     def test_flags_replace_config_and_connection_is_released(self):
         import duckdb
         from test_ingest import MonthlyArchive
-        from nemsplainer import nemweb
+        from nembot import nemweb
         nemweb.clear_cache()
         self.addCleanup(nemweb.clear_cache)
 
@@ -49,8 +49,8 @@ class ConfigLoad(unittest.TestCase):
             observations = []
             for config_flags in (['--config', str(config)], ['--cache-dir', str(root / 'cache')]):
                 database = root / f'actual{len(observations)}.duckdb'
-                argv = ['nemsplainer', *config_flags, '--tables', 'DISPATCHPRICE', '--start', '2026-08-01', '--end', '2026-08-01', '--database', str(database)]
-                with patch.object(sys, 'argv', argv), patch("nemsplainer.nemweb._open", side_effect=network.open), patch('nemsplainer.nemweb.REQUEST_INTERVAL', 0), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                argv = ['nembot', *config_flags, '--tables', 'DISPATCHPRICE', '--start', '2026-08-01', '--end', '2026-08-01', '--database', str(database)]
+                with patch.object(sys, 'argv', argv), patch("nembot.nemweb._open", side_effect=network.open), patch('nembot.nemweb.REQUEST_INTERVAL', 0), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     main()
                 with duckdb.connect(str(database)) as c:
                     observations.append(c.sql('SELECT REGIONID, RRP FROM DISPATCHPRICE').fetchall())

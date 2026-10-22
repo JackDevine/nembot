@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import duckdb
 
-from nemsplainer import downloads, nemweb
-from nemsplainer.ingest import load_mms
+from nembot import downloads, nemweb
+from nembot.ingest import load_mms
 from test_ingest import MonthlyArchive
 
 COLUMNS = ('DUID', 'BIDTYPE', 'TRADINGDATE', 'OFFERDATETIME', 'DIRECTION', 'PERIODID', 'MAXAVAIL')
@@ -42,8 +42,8 @@ class Fixture(unittest.TestCase):
         self.database = self.root / 'nem.duckdb'
         self.cache = self.root / 'cache'
         self.network = MonthlyArchive()
-        for target in (patch("nemsplainer.nemweb._open", side_effect=self.network.open),
-                       patch('nemsplainer.nemweb.REQUEST_INTERVAL', 0)):
+        for target in (patch("nembot.nemweb._open", side_effect=self.network.open),
+                       patch('nembot.nemweb.REQUEST_INTERVAL', 0)):
             target.start()
             self.addCleanup(target.stop)
         nemweb.clear_cache()
@@ -66,7 +66,7 @@ class GenericTables(Fixture):
         self.load('2026-09-10', '2026-09-10', progress=events.append).close()  # one day still loads the month
         with duckdb.connect(str(self.database)) as c:
             rows = c.execute('SELECT PERIODID, MAXAVAIL, OFFERDATETIME FROM BIDOFFERPERIOD ORDER BY 1').fetchall()
-            window = c.execute('SELECT window_start, window_end FROM _nemsplainer.files').fetchone()
+            window = c.execute('SELECT window_start, window_end FROM _nembot.files').fetchone()
         self.assertEqual([(int(p), float(m)) for p, m, _ in rows], [(1, 100.0), (2, 50.0)])
         self.assertEqual(rows[0][2].microsecond, 123000)
         self.assertEqual([w.date() for w in window], [date(2026, 9, 1), date(2026, 10, 1)])

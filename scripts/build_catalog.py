@@ -1,4 +1,4 @@
-"""Build src/nemsplainer/catalog.json from AEMO's Electricity Data Model Report PDF.
+"""Build src/nembot/catalog.json from AEMO's Electricity Data Model Report PDF.
 
 Usage: uv run python scripts/build_catalog.py [--pdf PATH] [--version 5.7]
 
@@ -22,12 +22,12 @@ import pdfplumber
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from nemsplainer import nemweb  # noqa: E402
-from nemsplainer.catalog import duckdb_type  # noqa: E402
+from nembot import nemweb  # noqa: E402
+from nembot.catalog import duckdb_type  # noqa: E402
 
 DOCS = 'https://di-help.docs.public.aemo.com.au/Content/Data_Model/'
 INDEX = DOCS + 'MMS_Data_Model.htm'
-OUTPUT = ROOT / 'src' / 'nemsplainer' / 'catalog.json'
+OUTPUT = ROOT / 'src' / 'nembot' / 'catalog.json'
 
 SUBSECTIONS = {
     'Description': 'description', 'Notes': 'notes', 'Primary Key Columns': 'pk',

@@ -6,9 +6,9 @@ import unittest
 
 import duckdb
 
-from nemsplainer import explorer
-from nemsplainer.ingest import _create_table
-from nemsplainer.tables import TABLES
+from nembot import explorer
+from nembot.ingest import _create_table
+from nembot.tables import TABLES
 
 
 class Explorer(unittest.TestCase):

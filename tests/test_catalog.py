@@ -6,8 +6,8 @@ import tempfile
 import unittest
 import zipfile
 
-from nemsplainer import catalog, nemweb
-from nemsplainer.tables import DEFAULT_TABLES, TABLES, Table
+from nembot import catalog, nemweb
+from nembot.tables import DEFAULT_TABLES, TABLES, Table
 
 # The original hand-written DISPATCHPRICE schema (from the HTML report).
 DISPATCHPRICE = [

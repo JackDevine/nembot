@@ -1,8 +1,8 @@
-nemsplainer.onChatEvent("html_preview", (event, place) => {
+nembot.onChatEvent("html_preview", (event, place) => {
   const data = event.data || {};
   const html = typeof data.html === "string" ? data.html : "";
   const height = Number(data.height) || 480;
-  const el = nemsplainer.el;
+  const el = nembot.el;
 
   const box = el("div", "html_preview-box");
   const bar = el("div", "html_preview-bar");
@@ -20,7 +20,7 @@ nemsplainer.onChatEvent("html_preview", (event, place) => {
   frameWrap.style.height = height + "px";
   const frame = document.createElement("iframe");
   frame.className = "html_preview-frame";
-  // Scripts may run, but without allow-same-origin the page cannot touch nemsplainer.
+  // Scripts may run, but without allow-same-origin the page cannot touch nembot.
   frame.setAttribute("sandbox", "allow-scripts allow-modals allow-popups");
   frame.setAttribute("referrerpolicy", "no-referrer");
   frame.title = data.title || "HTML preview";

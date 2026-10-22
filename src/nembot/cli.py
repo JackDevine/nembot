@@ -43,7 +43,7 @@ def main() -> None:
         print('Interrupted; committed files remain resumable.', file=sys.stderr)
         raise SystemExit(130) from None
     except (OSError, RuntimeError, ValueError, duckdb.Error) as exc:
-        print(f'nemsplainer: {exc}', file=sys.stderr)
+        print(f'nembot: {exc}', file=sys.stderr)
         raise SystemExit(1) from None
 
 

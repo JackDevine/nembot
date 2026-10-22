@@ -131,11 +131,11 @@ def loaded_months(db: duckdb.DuckDBPyConnection, table: str) -> list[str]:
     """Archive months ('YYYY-MM') already loaded for ``table``, from the file log."""
     cursor = db.cursor()
     try:
-        exists = cursor.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_nemsplainer' "
+        exists = cursor.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_nembot' "
                                 "AND table_name = 'files'").fetchone()[0]
         if not exists:
             return []
-        urls = [r[0] for r in cursor.execute('SELECT DISTINCT url FROM _nemsplainer.files WHERE table_name = ?',
+        urls = [r[0] for r in cursor.execute('SELECT DISTINCT url FROM _nembot.files WHERE table_name = ?',
                                              [table]).fetchall()]
     finally:
         cursor.close()

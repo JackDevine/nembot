@@ -295,11 +295,11 @@ def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
         result['rows'] = row[0]
         if column and row[1] is not None:
             result['range'] = [_jsonable(row[1]), _jsonable(row[2])]
-        has_files = cursor.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_nemsplainer' "
+        has_files = cursor.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_nembot' "
                                    "AND table_name = 'files'").fetchone()[0]
         if has_files:
             files = cursor.execute('SELECT count(DISTINCT url), min(processed_at), max(processed_at), '
-                                   'min(window_start), max(window_end) FROM _nemsplainer.files WHERE table_name = ?',
+                                   'min(window_start), max(window_end) FROM _nembot.files WHERE table_name = ?',
                                    [name]).fetchone()
             if files[0]:
                 result['files'] = {'count': files[0], 'first': _jsonable(files[1]), 'last': _jsonable(files[2]),

@@ -11,7 +11,7 @@ import zipfile
 
 import duckdb
 
-from nemsplainer import live
+from nembot import live
 
 REPORTS = live.REPORTS
 
@@ -23,7 +23,7 @@ def listing(area, family, names):
 def fake_listings(mapping):
     def _listing(url, ttl=None):
         return mapping.get(url, [])
-    return patch('nemsplainer.live.nemweb._listing', side_effect=_listing)
+    return patch('nembot.live.nemweb._listing', side_effect=_listing)
 
 
 def interval_csv(stamp, regions):
@@ -107,13 +107,13 @@ class Loading(unittest.TestCase):
             db = duckdb.connect(str(root / 'nem.duckdb'))
             files = [{'url': 'https://example/PUBLIC_DISPATCHIS_20261017.zip', 'kind': 'archive',
                       'start': '2026-10-17 00:00:00', 'end': '2026-10-18 00:00:00'}]
-            with patch('nemsplainer.live.nemweb.download', return_value=(daily, digest)), patch('sys.stdout', StringIO()):
+            with patch('nembot.live.nemweb.download', return_value=(daily, digest)), patch('sys.stdout', StringIO()):
                 live.load(db, 'DISPATCHPRICE', files, root / 'cache')
                 live.load(db, 'DISPATCHPRICE', files, root / 'cache')  # rerun: already recorded, skipped
             rows = db.execute('SELECT SETTLEMENTDATE, REGIONID, RRP FROM DISPATCHPRICE ORDER BY 1, 2').fetchall()
             self.assertEqual([(r[0].minute, r[1], float(r[2])) for r in rows],
                              [(5, 'NSW1', 50.5), (5, 'SA1', 80.0), (10, 'NSW1', 50.5), (10, 'SA1', 80.0)])
-            self.assertEqual(db.execute('SELECT count(*) FROM _nemsplainer.files').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM _nembot.files').fetchone()[0], 1)
             self.assertEqual(live.latest_loaded(db, 'DISPATCHPRICE'), datetime(2026, 10, 17, 0, 10))
             db.close()
 

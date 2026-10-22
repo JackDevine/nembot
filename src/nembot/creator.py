@@ -1,4 +1,4 @@
-"""Creator mode: a separate chat mode for building nemsplainer plugins.
+"""Creator mode: a separate chat mode for building nembot plugins.
 
 The analyst prompt never mentions how to change the app; everything about the
 plugin API lives here. Creator mode can inspect the running app, write files
@@ -17,7 +17,7 @@ from .plugins import API_VERSION, MAX_FILE_BYTES, PluginManager, safe_path
 
 TEST_TIMEOUT = 90
 
-PROMPT = f"""You are nemsplainer's plugin creator. nemsplainer is a local web app for exploring
+PROMPT = f"""You are nembot's plugin creator. nembot is a local web app for exploring
 Australia's NEM (National Electricity Market) data from AEMO: a chat analyst with DuckDB tools,
 an Explorer of MMS tables, Snippets, Reports, and plugins. You help the user build plugins that
 add features without changing the core app. You can't edit core files; only plugin drafts.
@@ -65,16 +65,16 @@ def setup(nem):
 Validate tool inputs yourself (they come from a model). Escape or whitelist values you put in SQL
 (e.g. check a region is one of NSW1, QLD1, SA1, TAS1, VIC1). Tools may be async.
 
-## client.js (runs in the page; `nemsplainer` is this plugin's API object)
-nemsplainer.addTab({{ id: "spikes", title: "Spikes", render(container) {{
-  container.append(nemsplainer.el("h2", "", "Price spikes"));
-  nemsplainer.getJSON("/summary").then(data => {{ /* path is relative to /plugins/<name> */ }});
+## client.js (runs in the page; `nembot` is this plugin's API object)
+nembot.addTab({{ id: "spikes", title: "Spikes", render(container) {{
+  container.append(nembot.el("h2", "", "Price spikes"));
+  nembot.getJSON("/summary").then(data => {{ /* path is relative to /plugins/<name> */ }});
 }} }});
-nemsplainer.onChatEvent("badge", (event, place) => place(nemsplainer.el("div", "", `n = ${{event.data.n}}`)));
-nemsplainer.addResultAction(result => {{  // result: {{type: "table"|"plot", sql, columns?, rows?, result_id?}}
-  const b = nemsplainer.el("button", "small", "My action"); b.onclick = () => alert(result.sql); return b;
+nembot.onChatEvent("badge", (event, place) => place(nembot.el("div", "", `n = ${{event.data.n}}`)));
+nembot.addResultAction(result => {{  // result: {{type: "table"|"plot", sql, columns?, rows?, result_id?}}
+  const b = nembot.el("button", "small", "My action"); b.onclick = () => alert(result.sql); return b;
 }});
-Helpers: nemsplainer.el(tag, className, text), .getJSON(path), .fetch(path, options), .renderTable(
+Helpers: nembot.el(tag, className, text), .getJSON(path), .fetch(path, options), .renderTable(
 {{columns, rows, sql?}}), .renderPlot({{spec, sql?}}) (a Vega-Lite spec WITH data), .renderMarkdown(text),
 .askChat(text) (prefill the analyst chat), .name. Use textContent, never innerHTML with data.
 Tabs appear in the top navigation at #plugin/<name>/<id>.
@@ -144,7 +144,7 @@ class Creator:
 
     def test(self, name: str, tool: str | None, args: dict | None, route: str | None) -> dict:
         draft = self.manager.start_draft(name)
-        command = [sys.executable, '-I', '-m', 'nemsplainer.plugin_test', str(draft), '--app-url', self.app_url,
+        command = [sys.executable, '-I', '-m', 'nembot.plugin_test', str(draft), '--app-url', self.app_url,
                    '--database', self.database]
         if tool:
             command += ['--tool', tool, '--args', json.dumps(args or {})]

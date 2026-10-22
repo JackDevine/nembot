@@ -5,7 +5,7 @@ import unittest
 
 import duckdb
 
-from nemsplainer import snippets
+from nembot import snippets
 
 SPEC = {'mark': 'line', 'encoding': {'x': {'field': 'x', 'type': 'quantitative'},
                                      'y': {'field': 'y', 'type': 'quantitative'}}, 'width': 640, 'height': 320}

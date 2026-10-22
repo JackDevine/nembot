@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import duckdb
 
-from nemsplainer import claude, openrouter
-from nemsplainer.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt, text_from_blocks
-from nemsplainer.models import ModelInfo
+from nembot import claude, openrouter
+from nembot.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt, text_from_blocks
+from nembot.models import ModelInfo
 
 OPUS = ModelInfo('claude:claude-opus-5-5', 'claude', 'claude-opus-5-5', 'Claude Opus 5.5', True, True, True)
 GLM = ModelInfo('openrouter:z-ai/glm', 'openrouter', 'z-ai/glm', 'GLM', True, True, True)
@@ -122,7 +122,7 @@ class FakeProvider:
 
 class DatabaseCase(unittest.TestCase):
     def setUp(self):
-        latest = patch('nemsplainer.chat.downloads.latest_published', return_value='2026-09')
+        latest = patch('nembot.chat.downloads.latest_published', return_value='2026-09')
         latest.start()
         self.addCleanup(latest.stop)
         self.directory = tempfile.TemporaryDirectory()
@@ -175,7 +175,7 @@ class FakeJobs:
         self.status, self.submitted = status, []
 
     def submit(self, table, start, end, reason='explorer'):
-        from nemsplainer.downloads import Job
+        from nembot.downloads import Job
         job = Job(table, start, end, reason)
         job.status = self.status
         job.error = 'boom' if self.status == 'failed' else None
@@ -209,7 +209,7 @@ class DownloadRequests(DatabaseCase):
                     conversation.pending[event['id']].set_result(decision)
             return events
         plan = {'table': 'DISPATCHLOAD', 'loaded_months': [], 'latest_month': '2026-09', 'month_size': 1}
-        with patch('nemsplainer.chat.downloads.plan', return_value=plan):
+        with patch('nembot.chat.downloads.plan', return_value=plan):
             events = asyncio.run(collect())
         return events, conversation.history[2]['results'][0]
 

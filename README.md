@@ -1,4 +1,4 @@
-# nemsplainer
+# nembot
 
 Load public AEMO MMS data into a local DuckDB database.
 
@@ -11,7 +11,7 @@ as effective-dated reference history, not interval data.
 ## Python API
 
 ```python
-from nemsplainer import load_mms
+from nembot import load_mms
 
 connection = load_mms(
     ["DISPATCHPRICE", "DISPATCHREGIONSUM", "DISPATCH_UNIT_SCADA", "DUDETAILSUMMARY"],
@@ -34,8 +34,8 @@ connection.close()
 ## CLI
 
 ```bash
-uv run nemsplainer --start 2026-06-01 --end 2026-08-31
-uv run nemsplainer --config nemsplainer.toml
+uv run nembot --start 2026-06-01 --end 2026-08-31
+uv run nembot --config nembot.toml
 ```
 
 Flags: `--tables`, `--start`, `--end`, `--database`, `--cache-dir`, `--config`.
@@ -45,7 +45,7 @@ TOML config accepts the same keys (`tables`, `start`, `end`, `database`,
 ## Web chat
 
 ```bash
-uv run nemsplainer-chat   # http://127.0.0.1:8000
+uv run nembot-chat   # http://127.0.0.1:8000
 ```
 
 A localhost chat analyst over `data/nem.duckdb` (opened read-only) that
@@ -65,7 +65,7 @@ chat, after which the assistant re-runs its query.
 
 ## Tables that feel like marimo
 
-Every table in nemsplainer, whether chat results, the Explorer, Snippets or
+Every table in nembot, whether chat results, the Explorer, Snippets or
 plugins, uses a port of [marimo](https://marimo.io)'s data table. If you like
 how marimo shows a dataframe, you get the same experience here:
 - bold column names with the data type underneath
@@ -99,7 +99,7 @@ as plain JavaScript, with no React; see [Acknowledgements](#acknowledgements).
 
 ## Plugins and Creator mode
 
-nemsplainer can be extended with **plugins**: new chat tools, tabs, buttons on
+nembot can be extended with **plugins**: new chat tools, tabs, buttons on
 results and HTTP endpoints. A plugin is a folder in `plugins/` with a
 `plugin.toml` and any of `plugin.py` (server: tools, routes, a short note for the
 assistant), `client.js` (browser: tabs, renderers, buttons) and `style.css`. The
@@ -117,7 +117,7 @@ assistant:
    JavaScript syntax errors)
 4. asks you before installing it
 
-Plugins run on your computer with nemsplainer's permissions, so only install
+Plugins run on your computer with nembot's permissions, so only install
 code you trust. Installed plugins are backed up before being replaced.
 
 ## Snippets
@@ -166,7 +166,7 @@ holds the database open for writing, so stop it before using the CLI.
   `LASTCHANGED` corrections update existing rows, equal-timestamp conflicts
   abort the affected file's transaction.
 - Source URLs, SHA256 hashes and per-request completion windows are recorded in
-  the `_nemsplainer.files` table.
+  the `_nembot.files` table.
 - This build performs a single run and exits; there is no automatic polling.
   Data freshness is bounded by AEMO's monthly publication schedule.
 
@@ -175,30 +175,30 @@ holds the database open for writing, so stop it before using the CLI.
 > Contains data from the Australian Energy Market Operator (AEMO), published on
 > NEMWEB, used under AEMO's Copyright Permissions
 > (aemo.com.au/privacy-and-legal-notices/copyright-permissions). Processed by
-> nemsplainer; not endorsed by AEMO. AEMO gives no warranty of accuracy,
+> nembot; not endorsed by AEMO. AEMO gives no warranty of accuracy,
 > completeness or currency; use at your own risk.
 
 The same credit appears in the app (**Data: AEMO** in the header) and in
 every exported report and notebook.
 
 Downloads are polite but not slow:
-- 2 connections at most by default (`NEMSPLAINER_CONCURRENCY`, capped at 3),
+- 2 connections at most by default (`NEMBOT_CONCURRENCY`, capped at 3),
   reused rather than reopened for every file
 - requests paced by NEMWEB's response time (AutoThrottle-style), with
-  `NEMSPLAINER_REQUEST_INTERVAL` as an optional minimum gap
+  `NEMBOT_REQUEST_INTERVAL` as an optional minimum gap
 - on errors it drops to one request at a time with backoff (honouring
   `Retry-After`), and it stops after repeated HTTP 403s
 - listings are cached for an hour and files are never downloaded twice
 
 ## Acknowledgements
 
-- **marimo**: nemsplainer's data tables are ported from
+- **marimo**: nembot's data tables are ported from
   [marimo](https://github.com/marimo-team/marimo)'s data table, Copyright 2026
   Marimo, licensed under the Apache License 2.0. The look, layout, colours,
   formatting and interactions come from marimo; the code was rewritten without
   React, TanStack Table or Tailwind. The notebook export also targets marimo.
   See `LICENSES/marimo-LICENSE.txt` and the header of
-  `src/nemsplainer/static/datatable.js`.
+  `src/nembot/static/datatable.js`.
 - **Lucide**: table icons from [Lucide](https://lucide.dev) (ISC licence), as
   used by marimo. See `LICENSES/lucide-LICENSE.txt`.
 - **DeepSeek Harness**: the plugin architecture and the separate Creator mode

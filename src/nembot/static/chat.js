@@ -7,7 +7,7 @@ const send = document.getElementById('send');
 let conversation = crypto.randomUUID();
 let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
 
-const CREATOR_INTRO = 'Creator mode builds plugins: new chat tools, tabs and buttons for nemsplainer. ' +
+const CREATOR_INTRO = 'Creator mode builds plugins: new chat tools, tabs and buttons for nembot. ' +
   'Describe what you want. The assistant writes the plugin as a draft, tests it in a separate process, ' +
   'and asks before installing it. Plugins run on your computer, so review what it shows you.';
 
@@ -205,7 +205,7 @@ function pluginInstallCard(event) {
   card.append(files);
   const test = event.test || {};
   card.append(el('p', test.ok ? 'ok' : 'error', test.ok ? '✓ Loads cleanly in a test process.' : `✗ The last test found problems: ${test.load_error || test.client_js_error || test.error || 'see above'}`));
-  card.append(el('p', 'muted', 'Plugins run on your computer with nemsplainer’s permissions. Expand the 📝 entries above to review the code.'));
+  card.append(el('p', 'muted', 'Plugins run on your computer with nembot’s permissions. Expand the 📝 entries above to review the code.'));
   const install = el('button', 'primary', event.replacing ? 'Update' : 'Install'), skip = el('button', '', 'Not now');
   const decide = async ok => {
     install.disabled = skip.disabled = true;

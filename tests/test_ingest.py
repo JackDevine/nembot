@@ -17,7 +17,7 @@ import zipfile
 
 import duckdb
 
-from nemsplainer import load_mms, nemweb
+from nembot import load_mms, nemweb
 
 
 ROOT = "https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/"
@@ -167,12 +167,12 @@ class IngestTests(unittest.TestCase):
         self.database = self.root / "store" / "nem.duckdb"
         self.cache = self.root / "cache"
         self.network = MonthlyArchive()
-        interval_patch = patch("nemsplainer.nemweb.REQUEST_INTERVAL", 0)
+        interval_patch = patch("nembot.nemweb.REQUEST_INTERVAL", 0)
         interval_patch.start()
         self.addCleanup(interval_patch.stop)
         nemweb.clear_cache()
         self.addCleanup(nemweb.clear_cache)
-        network_patch = patch("nemsplainer.nemweb._open", side_effect=self.network.open)
+        network_patch = patch("nembot.nemweb._open", side_effect=self.network.open)
         self.urlopen = network_patch.start()
         self.addCleanup(network_patch.stop)
         self.stdout = StringIO()
@@ -261,14 +261,14 @@ class IngestTests(unittest.TestCase):
         with self.assertRaises((ValueError, RuntimeError, duckdb.Error)):
             self.load()
         self.assertEqual(self.stored("SELECT SETTLEMENTDATE, RRP FROM DISPATCHPRICE"), [(datetime(2024, 2, 1, 0, 5), Decimal("42.12345"))])
-        self.assertEqual(self.stored("SELECT url FROM _nemsplainer.files"), [(good_url,)])
+        self.assertEqual(self.stored("SELECT url FROM _nembot.files"), [(good_url,)])
 
     def test_conflicting_ties_within_one_file_do_not_commit(self):
         self.network.add_file("DISPATCHPRICE", 2024, 2, [price_row(), price_row(RRP="999")])
         with self.assertRaises((ValueError, RuntimeError, duckdb.Error)):
             self.load()
         self.assertEqual(self.stored("SELECT count(*) FROM DISPATCHPRICE"), [(0,)])
-        self.assertEqual(self.stored("SELECT count(*) FROM _nemsplainer.files"), [(0,)])
+        self.assertEqual(self.stored("SELECT count(*) FROM _nembot.files"), [(0,)])
 
     def test_invalid_selected_data_rolls_back_without_completion(self):
         valid = mms_csv("DISPATCHPRICE", [price_row()])
@@ -293,7 +293,7 @@ class IngestTests(unittest.TestCase):
                 with self.assertRaises((ValueError, RuntimeError, duckdb.Error)):
                     self.load()
                 self.assertEqual(self.stored("SELECT count(*) FROM DISPATCHPRICE"), [(0,)])
-                self.assertEqual(self.stored("SELECT count(*) FROM _nemsplainer.files"), [(0,)])
+                self.assertEqual(self.stored("SELECT count(*) FROM _nembot.files"), [(0,)])
 
     def test_narrow_then_wide_and_fresh_database_reuse_cached_files(self):
         self.network.add_file("DISPATCHPRICE", 2024, 2, [

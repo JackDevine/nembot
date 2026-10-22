@@ -9,12 +9,12 @@ import unittest
 import duckdb
 import polars
 
-from nemsplainer import creator as creator_mode, plugins
-from nemsplainer.chat import Conversation, TOOLS, mode_setup, run_turn
-from nemsplainer.models import ModelInfo
+from nembot import creator as creator_mode, plugins
+from nembot.chat import Conversation, TOOLS, mode_setup, run_turn
+from nembot.models import ModelInfo
 
 MODEL = ModelInfo('claude:claude-haiku-5-5', 'claude', 'claude-haiku-5-5', 'Claude Haiku 5.5', True, True, True)
-logging.getLogger('nemsplainer.plugins').setLevel(logging.ERROR)  # broken plugins are expected here
+logging.getLogger('nembot.plugins').setLevel(logging.ERROR)  # broken plugins are expected here
 EXAMPLE = Path(__file__).resolve().parents[1] / 'plugins' / 'price-spikes'
 
 GOOD = '''
@@ -160,7 +160,7 @@ class Turns(unittest.TestCase):
         from unittest.mock import patch
         async def collect():
             return [e async for e in run_turn({'claude': provider}, self.db, conversation, 'q', MODEL, **kwargs)]
-        with patch('nemsplainer.chat.downloads.latest_published', return_value='2026-09'):
+        with patch('nembot.chat.downloads.latest_published', return_value='2026-09'):
             return asyncio.run(collect())
 
     def test_plugin_tool_runs_in_analyst_mode(self):
@@ -202,7 +202,7 @@ class Turns(unittest.TestCase):
                     conversation.pending[event['id']].set_result({'approve': True})
             return out
         from unittest.mock import patch
-        with patch('nemsplainer.chat.downloads.latest_published', return_value='2026-09'):
+        with patch('nembot.chat.downloads.latest_published', return_value='2026-09'):
             events = asyncio.run(install())
         result = next(e for e in events if e['type'] == 'plugin_install_result')
         self.assertEqual(result['status'], 'loaded')

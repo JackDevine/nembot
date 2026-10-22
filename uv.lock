@@ -1463,7 +1463,7 @@ wheels = [
 ]
 
 [[package]]
-name = "nemsplainer"
+name = "nembot"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

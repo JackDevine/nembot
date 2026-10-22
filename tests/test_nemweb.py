@@ -11,7 +11,7 @@ import urllib.request
 from urllib.error import HTTPError, URLError
 import zipfile
 
-from nemsplainer import nemweb
+from nembot import nemweb
 
 URL = nemweb.ROOT + '2026/'
 
@@ -33,7 +33,7 @@ class Fresh(unittest.TestCase):
     def setUp(self):
         nemweb.clear_cache()
         self.addCleanup(nemweb.clear_cache)
-        throttle = patch('nemsplainer.nemweb._throttle', nemweb._Throttle())
+        throttle = patch('nembot.nemweb._throttle', nemweb._Throttle())
         throttle.start()
         self.addCleanup(throttle.stop)
 
@@ -42,7 +42,7 @@ class Courtesy(Fresh):
     def setUp(self):
         super().setUp()
         self.sleeps = []
-        target = patch('nemsplainer.nemweb.time.sleep', side_effect=self.sleeps.append)
+        target = patch('nembot.nemweb.time.sleep', side_effect=self.sleeps.append)
         target.start()
         self.addCleanup(target.stop)
 
@@ -57,14 +57,14 @@ class Courtesy(Fresh):
             if isinstance(outcome, Exception):
                 raise outcome
             return outcome
-        target = patch('nemsplainer.nemweb._open', side_effect=opener)
+        target = patch('nembot.nemweb._open', side_effect=opener)
         target.start()
         self.addCleanup(target.stop)
 
     def test_requests_identify_the_tool(self):
         self.serve(response())
         nemweb._listing(URL)
-        self.assertIn('nemsplainer', self.requests[0].get_header('User-agent'))
+        self.assertIn('nembot', self.requests[0].get_header('User-agent'))
 
     def test_listings_are_cached_within_the_ttl(self):
         self.serve(response())
@@ -100,7 +100,7 @@ class Courtesy(Fresh):
 
     def test_optional_minimum_interval_spaces_requests(self):
         self.serve(response(), response())
-        with patch('nemsplainer.nemweb.REQUEST_INTERVAL', 1.0):
+        with patch('nembot.nemweb.REQUEST_INTERVAL', 1.0):
             nemweb._listing(URL)
             nemweb._listing(URL + 'MMSDM_2026_08/')
         self.assertTrue(any(0 < s <= 1.0 for s in self.sleeps))
@@ -152,7 +152,7 @@ class Parallel(Fresh):
                 state['active'] -= 1
             return BytesIO(payload)
         urls = [f'https://example.test/f{i}.zip' for i in range(12)]
-        with patch('nemsplainer.nemweb._open', side_effect=opener), tempfile.TemporaryDirectory() as cache:
+        with patch('nembot.nemweb._open', side_effect=opener), tempfile.TemporaryDirectory() as cache:
             got = [url for url, path, digest in nemweb.download_many(urls, cache)]
         self.assertEqual(got, urls)
         self.assertLessEqual(state['peak'], nemweb.CONCURRENCY)

@@ -275,7 +275,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return FileResponse(path, media_type='text/css')
         # Scope client.js to its own API object, so it can't see other plugins' state.
         source = path.read_text()
-        wrapped = f'nemsplainer.definePlugin({json.dumps(name)}, function (nemsplainer) {{\n{source}\n}});\n'
+        wrapped = f'nembot.definePlugin({json.dumps(name)}, function (nembot) {{\n{source}\n}});\n'
         return Response(wrapped, media_type='text/javascript')
 
     async def plugin_route(request: Request):
@@ -428,7 +428,7 @@ def main() -> None:
     try:
         app = create_app(args.database, args.cache_dir, f'http://{args.host}:{args.port}', args.plugins_dir)
     except duckdb.IOException as exc:
-        parser.error(f'cannot open {args.database} for writing ({exc}). Is another nemsplainer process using it?')
+        parser.error(f'cannot open {args.database} for writing ({exc}). Is another nembot process using it?')
     uvicorn.run(app, host=args.host, port=args.port)
 
 

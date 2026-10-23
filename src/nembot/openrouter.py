@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import AsyncIterator
 import uuid
 
@@ -84,6 +85,24 @@ def _merge_reasoning(merged: list[dict], pieces) -> None:
                 target[key] = value
 
 
+def usage_event(model: ModelInfo, usage, started: float | None, finished: float) -> dict:
+    """Tokens, cost and generation time of one request, for the chat's stats line.
+
+    OpenRouter reports the request's cost; if it doesn't, estimate it from the catalogue's prices.
+    """
+    details = getattr(usage, 'prompt_tokens_details', None)
+    cached = (getattr(details, 'cached_tokens', 0) or 0) if details else 0
+    prompt, output = usage.prompt_tokens or 0, usage.completion_tokens or 0
+    server = _extra(usage, 'server_tool_use')
+    searches = server.get('web_search_requests', 0) if isinstance(server, dict) else 0
+    cost = _extra(usage, 'cost')
+    if cost is None and model.price_in is not None and model.price_out is not None:
+        cost = (prompt * model.price_in + output * model.price_out) / 1_000_000
+    return {'type': 'usage', 'model': model.id, 'input': prompt - cached, 'cache_write': 0, 'cache_read': cached,
+            'output': output, 'searches': searches or 0, 'cost': float(cost) if cost is not None else None,
+            'seconds': round(finished - started, 3) if started else None}
+
+
 def _extra(obj, name):
     value = getattr(obj, name, None)
     if value is None and getattr(obj, 'model_extra', None):
@@ -123,6 +142,7 @@ class OpenRouterProvider:
         )
         text, calls, reasoning, sources = [], {}, [], {}
         finish, usage, in_text = None, None, False
+        started = None
         async for chunk in stream:
             error = _extra(chunk, 'error')
             if error:
@@ -134,6 +154,8 @@ class OpenRouterProvider:
                 continue
             choice = chunk.choices[0]
             delta = choice.delta
+            if started is None and (delta.content or delta.tool_calls or _extra(delta, 'reasoning') or _extra(delta, 'reasoning_details')):
+                started = time.monotonic()  # first generated token
             _merge_reasoning(reasoning, _extra(delta, 'reasoning_details'))
             for annotation in _extra(delta, 'annotations') or []:
                 citation = annotation.get('url_citation') if isinstance(annotation, dict) else None
@@ -159,9 +181,11 @@ class OpenRouterProvider:
             if choice.finish_reason:
                 finish = choice.finish_reason
 
+        finished = time.monotonic()
         if usage:
             log.info('openrouter %s: in=%s out=%s cost=%s searches=%s finish=%s', model.id, usage.prompt_tokens,
                      usage.completion_tokens, _extra(usage, 'cost'), _extra(usage, 'server_tool_use'), finish)
+            yield usage_event(model, usage, started, finished)
         if sources:
             yield {'type': 'sources', 'kind': 'cited', 'sources': list(sources.values())}
         if finish == 'content_filter':

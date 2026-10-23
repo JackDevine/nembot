@@ -4,6 +4,7 @@ const log = document.getElementById('log');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
+const chatStats = document.getElementById('chat-stats');
 let conversation = null;    // the chat on screen
 let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
 // Each chat shown this session has its own pane in the log, so a reply keeps streaming into
@@ -24,7 +25,8 @@ function drawModeSwitch() {
 }
 
 function createPane(id, mode, webSearchOn) {
-  const pane = { id, el: el('div', 'chat-pane'), mode, webSearch: webSearchOn, busy: false, waiting: false, firstText: null };
+  const pane = { id, el: el('div', 'chat-pane'), mode, webSearch: webSearchOn, busy: false, waiting: false, firstText: null,
+    stats: { requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, searches: 0, cost: 0, unpriced: false, genSeconds: 0, genOutput: 0 } };
   pane.el.hidden = true;
   if (mode === 'creator') pane.el.append(el('div', 'creator-banner', CREATOR_INTRO));
   log.append(pane.el);
@@ -47,6 +49,7 @@ function showPane(id) {
     if (other !== pane && !other.busy) { other.el.remove(); panes.delete(other.id); }
   }
   send.disabled = pane.busy;
+  drawChatStats();
   drawModeSwitch();
   window.drawChatList?.();
   log.scrollTop = log.scrollHeight;
@@ -300,6 +303,37 @@ function throbber() {
   return wrap;
 }
 
+// ---- The stats line under the chat: cost, tokens and speed for the whole chat ----
+// Each model request reports a 'usage' event (tokens, cost, generation seconds); saved chats
+// replay theirs, so the totals survive reopening a chat.
+function addUsage(stats, u) {
+  stats.requests += 1;
+  stats.input += u.input || 0; stats.cacheRead += u.cache_read || 0; stats.cacheWrite += u.cache_write || 0;
+  stats.output += u.output || 0; stats.searches += u.searches || 0;
+  if (u.cost === null || u.cost === undefined) stats.unpriced = true; else stats.cost += u.cost;
+  if (u.seconds > 0) { stats.genSeconds += u.seconds; stats.genOutput += u.output || 0; }
+}
+
+function tokenCount(n) { return Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n); }
+function formatCost(c) { return `$${c < 0.01 ? c.toFixed(4) : c < 1 ? c.toFixed(3) : c.toFixed(2)}`; }
+
+function drawChatStats() {
+  const s = currentPane()?.stats;
+  if (!s || !s.requests) { chatStats.hidden = true; return; }
+  const input = s.input + s.cacheRead + s.cacheWrite;
+  const speed = s.genSeconds > 0 ? Math.round(s.genOutput / s.genSeconds) : null;
+  chatStats.textContent = `This chat: ${s.unpriced ? '≥ ' : ''}${formatCost(s.cost)} · ${tokenCount(input)} tokens in · `
+    + `${tokenCount(s.output)} out${speed === null ? '' : ` · ${speed} tokens/s`}`;
+  chatStats.title = [
+    `Input: ${s.input.toLocaleString()} new, ${s.cacheRead.toLocaleString()} read from cache, ${s.cacheWrite.toLocaleString()} written to cache`,
+    `Output: ${s.output.toLocaleString()} tokens (including thinking)`,
+    `Model requests: ${s.requests}` + (s.searches ? `; web searches: ${s.searches}` : ''),
+    speed === null ? '' : 'Speed: output tokens per second while generating, averaged over the chat',
+    s.unpriced ? 'Some replies came from models without price data, so the cost is a lower bound.' : '',
+  ].filter(Boolean).join('\n');
+  chatStats.hidden = false;
+}
+
 // One chat turn in ``pane``: the user's text, then the reply as its UI events arrive. With
 // ``replay`` (redrawing a saved chat) nothing opens, downloads or waits for an answer.
 function renderTurn(text, pane, { replay = false } = {}) {
@@ -443,6 +477,7 @@ function renderTurn(text, pane, { replay = false } = {}) {
       }
       case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
       case 'chat_title': renameChatInList(event.id, event.title); break;
+      case 'usage': addUsage(pane.stats, event); if (shown()) drawChatStats(); break;
     }
   }
 

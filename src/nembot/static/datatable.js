@@ -12,10 +12,12 @@
  * Copyright 2026 Marimo. Licensed under the Apache License, Version 2.0; see
  * LICENSES/marimo-LICENSE.txt. Changes: rewritten from React + TanStack Table + Tailwind
  * into a dependency-free DOM component. Markup, styles (the .mo-* rules in app.css), the
- * light-theme colours, formatting, selection behaviour and stats, filter operators,
+ * light- and dark-theme colours, formatting, selection behaviour and stats, filter operators,
  * labels and pills, the context menu, column visibility, text wrapping, the row viewer,
- * search, export and pagination follow marimo. Not ported: frozen columns, column summary
- * charts, the column explorer, row selection checkboxes and virtualisation.
+ * column summary charts, search, export and pagination follow marimo. Added here:
+ * Ctrl/⌘+arrow jumps to the edge of the page's rows or visible columns (Shift extends the
+ * selection). Not ported: frozen columns, the column explorer, row selection checkboxes
+ * and virtualisation.
  *
  * Icons are Lucide icons (ISC licence, see LICENSES/lucide-LICENSE.txt), as used by marimo.
  *
@@ -1115,7 +1117,10 @@ function createDataTable(options) {
     e.preventDefault();
     const [dr, dc] = moves[e.key];
     const from = state.focus || { r: 0, c: 0 };
-    const next = { r: Math.max(0, Math.min(state.rows.length - 1, from.r + dr)), c: Math.max(0, Math.min(visible().length - 1, from.c + dc)) };
+    // Ctrl/⌘+arrow jumps to the edge of the page's rows or the visible columns, as in a spreadsheet
+    // (with Shift it extends the selection there).
+    const target = (at, d, last) => (d === 0 ? at : mod ? (d > 0 ? last : 0) : Math.max(0, Math.min(last, at + d)));
+    const next = { r: target(from.r, dr, state.rows.length - 1), c: target(from.c, dc, visible().length - 1) };
     if (e.shiftKey && state.anchor) state.focus = next;
     else state.anchor = state.focus = next;
     focusCell(next);

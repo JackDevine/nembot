@@ -249,6 +249,8 @@ button.small { font-size: 12px; padding: 3px 8px; }
 .mode-switch button { border: none; border-radius: 0; font-size: 12px; padding: 2px 10px; background: var(--surface); color: var(--muted); }
 .mode-switch button.active { background: var(--accent); color: white; }
 .mode-switch button[data-mode="creator"].active { background: var(--creator); }
+.chat-stats { font-size: 12px; color: var(--muted); text-align: right; padding: 0 20px 8px; margin-top: -4px; cursor: default; font-variant-numeric: tabular-nums; }
+.chat-stats[hidden] { display: none; }
 #chat-view.creator #form { border-top: 2px solid var(--creator); }
 .creator-banner { max-width: 900px; margin: 0 auto 18px; padding: 10px 14px; border-radius: 8px; background: var(--creator-bg); border: 1px solid var(--creator-border); font-size: 14px; }
 .result-actions { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }

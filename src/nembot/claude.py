@@ -1,11 +1,13 @@
 """Claude via the Anthropic API: renders neutral history and streams one response."""
 import logging
+import time
 from typing import AsyncIterator
 
 import anthropic
 
 from .chat import TOOLS, VISION_PLOT_NOTE, earlier_reply_label, system_prompt, text_from_blocks
 from .models import ModelInfo
+from .pricing import claude_cost
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +119,18 @@ def _echoable(content: list) -> list:
     return [b for i, b in enumerate(content) if i > boundary or b.type not in dropped]
 
 
+def usage_event(response, started: float | None, finished: float) -> dict:
+    """Tokens, cost and generation time of one request, for the chat's stats line."""
+    usage = response.usage
+    server = getattr(usage, 'server_tool_use', None)
+    tokens = {'input': usage.input_tokens or 0, 'cache_write': usage.cache_creation_input_tokens or 0,
+              'cache_read': usage.cache_read_input_tokens or 0, 'output': usage.output_tokens or 0,
+              'searches': (getattr(server, 'web_search_requests', 0) or 0) if server else 0}
+    # Priced by the model that served the request (a fallback may have taken over).
+    return {'type': 'usage', 'model': response.model, **tokens, 'cost': claude_cost(response.model, **tokens),
+            'seconds': round(finished - started, 3) if started else None}
+
+
 class ClaudeProvider:
     def __init__(self, client: anthropic.AsyncAnthropic):
         self.client = client
@@ -147,8 +161,10 @@ class ClaudeProvider:
                     cache_control={'type': 'ephemeral'},
                     **request_options(model.id),
                 ) as stream:
-                    previous = None
+                    previous, started = None, None
                     async for event in stream:
+                        if event.type == 'content_block_start' and started is None:
+                            started = time.monotonic()  # generation begins (thinking included)
                         if event.type == 'content_block_start':
                             kind = event.content_block.type
                             if kind in ('tool_use', 'server_tool_use'):
@@ -162,6 +178,7 @@ class ClaudeProvider:
                                 yield {'type': 'text', 'delta': event.delta.text}
                             elif event.delta.type == 'thinking_delta':
                                 yield {'type': 'progress', 'delta': event.delta.thinking}
+                    finished = time.monotonic()
                     response = await stream.get_final_message()
                 break
             except ValueError:
@@ -174,6 +191,7 @@ class ClaudeProvider:
         usage = response.usage
         log.info('claude %s: in=%s cache_read=%s cache_write=%s out=%s stop=%s', response.model, usage.input_tokens,
                  usage.cache_read_input_tokens, usage.cache_creation_input_tokens, usage.output_tokens, response.stop_reason)
+        yield usage_event(response, started, finished)
         if response.stop_reason == 'refusal':
             yield {'type': 'error', 'message': 'The model declined this request.'}
             return

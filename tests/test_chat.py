@@ -159,6 +159,30 @@ class TurnLoop(DatabaseCase):
             self.run_turn(FakeProvider(fail=True), conversation, 'second')
         self.assertEqual(len(conversation.history), 4)
 
+    def test_plot_carries_its_data_instead_of_a_final_table(self):
+        spec = '{"mark": "bar", "encoding": {"x": {"field": "r", "type": "nominal"}, "y": {"field": "p", "type": "quantitative"}}}'
+
+        class PlotProvider:
+            async def respond(self, model, history, **options):
+                if history[-1]['role'] == 'user':
+                    yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': '', 'raw': {},
+                           'tool_calls': [{'id': 'p1', 'name': 'visualize_mms', 'input': {
+                               'sql': "SELECT 'SA1' AS r, 90 AS p UNION ALL SELECT 'NSW1', 70", 'plot_spec': spec}}],
+                           'stop': 'tool_use'}
+                    return
+                yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': 'SA1 is higher.',
+                       'raw': {}, 'tool_calls': [], 'stop': 'end'}
+
+        conversation = Conversation()
+        events = self.run_turn(PlotProvider(), conversation)
+        self.assertEqual([e['type'] for e in events], ['tool_running', 'plot'])  # no table at the end
+        plot = events[1]
+        self.assertEqual((plot['columns'], plot['total'], plot['result_id']), (['r', 'p'], 2, 'R1'))
+        self.assertCountEqual(plot['rows'], [['SA1', 90], ['NSW1', 70]])
+        result = conversation.history[2]['results'][0]['text']
+        self.assertTrue(result.startswith('Result id: R1\nPlot created from all 2 rows. First 10 rows:\nr,p\n'))
+        self.assertEqual(conversation.results['R1']['plot_spec']['mark'], 'bar')
+
     def test_query_tool_rejects_writes(self):
         text, image, events = query_tool(self.db, 'CREATE TABLE x (a INT)')
         self.assertEqual((text, image, events), ('Only one SELECT query is allowed.', None, []))

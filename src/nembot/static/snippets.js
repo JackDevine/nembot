@@ -112,10 +112,15 @@ async function drawSnippet(id) {
 async function showSnippets(id) {
   try {
     if (!snippetsState.list) snippetsState.list = (await getJSON('/api/snippets')).snippets;
+    // Opening the tab shows the top snippet straight away (replacing the address, so Back still works).
+    if (!id && snippetsState.list.length) {
+      id = String(snippetsState.list[0].id);
+      history.replaceState(null, '', `#snippets/${id}`);
+    }
     snippetsState.current = id;
     drawSnippetList();
     if (id) await drawSnippet(id);
-    else snippetView.replaceChildren(el('p', 'empty', snippetsState.list.length ? 'Choose a snippet on the left.' : 'No snippets yet.'));
+    else snippetView.replaceChildren(el('p', 'empty', 'No snippets yet.'));
   } catch (err) {
     snippetView.replaceChildren(el('div', 'error', `⚠️ ${err.message}`));
   }

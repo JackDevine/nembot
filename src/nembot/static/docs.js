@@ -816,12 +816,20 @@ async function showDocs(id) {
   if (!docsState.list) {
     try { docsState.list = (await getJSON('/api/docs')).docs; } catch (err) { docList.replaceChildren(el('p', 'error', err.message)); return; }
   }
+  // Opening the tab shows the most recent document (replacing the address, so Back still works),
+  // skipping one that's open beside the chat so the side panel isn't closed.
+  const recent = docsState.list.find(d => !(docsState.side && docsState.side.id === d.id));
+  if (!id && recent) {
+    id = String(recent.id);
+    history.replaceState(null, '', `#docs/${id}`);
+  }
   drawDocList(id);
   const docId = id ? Number(id) : null;
   if (!docId) {
     docsState.page?.destroy();
     docsState.page = null;
-    docPage.replaceChildren(el('p', 'empty', docsState.list.length ? 'Choose a document on the left.' : 'No documents yet. Create one, or ask nembot in the chat to write something up.'));
+    docPage.replaceChildren(el('p', 'empty', docsState.list.length ? 'Choose a document on the left.'
+      : 'No documents yet. Create one, or ask nembot in the chat to write something up.'));
     return;
   }
   if (docsState.page && docsState.page.id === docId) return;

@@ -201,6 +201,10 @@ Downloads are polite but not slow:
   React, TanStack Table or Tailwind. The notebook export also targets marimo.
   See `LICENSES/marimo-LICENSE.txt` and the header of
   `src/nembot/static/datatable.js`.
+- **marimo, again**: SQL and plot specifications are syntax-highlighted with
+  marimo's editor colours (its light theme and One Dark-style dark theme, read
+  from marimo's code editor). SQL is parsed with the open-source parser
+  marimo's editor uses, CodeMirror's Lezer SQL grammar (MIT), loaded from a CDN.
 - **Lucide**: table icons from [Lucide](https://lucide.dev) (ISC licence), as
   used by marimo. See `LICENSES/lucide-LICENSE.txt`.
 - **DeepSeek Harness**: the plugin architecture and the separate Creator mode

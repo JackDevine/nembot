@@ -252,26 +252,38 @@ function pluginInstallCard(event, chatId) {
 
 // The logo (static/logo.svg) as a throbber: the bolts pop in left to right, the robot hops
 // and its eyes brighten with each one, then a shine sweeps across (option H in
-// design/throbber-options.html). It's inline so CSS can animate its parts; the mask repeats the shapes
-// so the shine only lights up what is showing.
+// design/throbber-options.html). It's inline so CSS can animate its parts. The shine is
+// clipped to copies of the shapes (a clip-path, not a mask, and a band no taller than the
+// robot): with a mask, GPU rendering in Chromium drew faint lines along the masked area's
+// top and bottom edges as the shine moved.
+
 const LOGO_BOLT = 'M3,-16 L-7,2 L-1,2 L-4,16 L8,-4 L2,-4 L8,-16 Z';
 let throbberCount = 0;
 
 function throbber() {
   const id = `nb-shine-${++throbberCount}`;
-  // The shine's mask stays well inside the head's outline (which is only a pixel wide at 28px) and
-  // uses slightly smaller bolts (shrink < 1), so the shine never lights the edges.
-  const bolts = (fill, shrink = 1) => [['left', 28, 34, -32, 1.05], ['middle', 60, 26, 0, 1.25], ['right', 92, 34, 32, 1.05]]
-    .map(([k, x, y, r, s]) => `<g class="nb-bolt nb-bolt-${k}"><path d="${LOGO_BOLT}" transform="translate(${x} ${y}) rotate(${r}) scale(${s * shrink})" fill="${fill}"/></g>`)
+  // The clip stays well inside the head's outline (only a pixel wide at 28px) and uses slightly
+  // smaller bolts (shrink < 1), so the shine never lights the edges.
+  const placed = [['left', 28, 34, -32, 1.05], ['middle', 60, 26, 0, 1.25], ['right', 92, 34, 32, 1.05]];
+  const bolts = fill => placed
+    .map(([k, x, y, r, s]) => `<g class="nb-bolt nb-bolt-${k}"><path d="${LOGO_BOLT}" transform="translate(${x} ${y}) rotate(${r}) scale(${s})" fill="${fill}"/></g>`)
     .join('');
+  // A clip-path can't hold groups, so its bolts are plain paths with the placement built into
+  // their points (and the pop-in class on the path itself).
+  const clipBolts = shrink => placed.map(([k, x, y, r, s]) => {
+    const a = r * Math.PI / 180, k2 = s * shrink;
+    const d = LOGO_BOLT.replace(/(-?[\d.]+),(-?[\d.]+)/g, (_, px, py) =>
+      `${(x + k2 * (px * Math.cos(a) - py * Math.sin(a))).toFixed(2)},${(y + k2 * (px * Math.sin(a) + py * Math.cos(a))).toFixed(2)}`);
+    return `<path class="nb-bolt nb-bolt-${k}" d="${d}"/>`;
+  }).join('');
   const wrap = el('span', 'throbber');
   wrap.innerHTML = `<svg viewBox="0 0 120 120" aria-hidden="true">
     <defs>
       <linearGradient id="${id}-head" gradientUnits="userSpaceOnUse" x1="0" y1="52" x2="0" y2="108"><stop offset="0" stop-color="#64748b"/><stop offset="1" stop-color="#1e293b"/></linearGradient>
       <linearGradient id="${id}-band"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".7"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
-      <mask id="${id}-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
-        <rect x="28" y="58" width="64" height="44" rx="10" fill="#fff"/>${bolts('#fff', 0.88)}
-      </mask>
+      <clipPath id="${id}-clip">
+        <rect x="28" y="58" width="64" height="44" rx="10" fill="#fff"/>${clipBolts(0.88)}
+      </clipPath>
     </defs>
     <g class="nb-body">
       <rect x="13" y="70" width="12" height="20" rx="4" fill="#334155"/>
@@ -282,7 +294,7 @@ function throbber() {
       <g class="nb-eye-dim" fill="url(#${id}-head)"><circle cx="44" cy="78" r="8.5"/><circle cx="76" cy="78" r="8.5"/></g>
       <rect x="46" y="94" width="28" height="5" rx="2.5" fill="#38bdf8" opacity=".6"/>
       ${bolts('#f59e0b')}
-      <g mask="url(#${id}-mask)"><g class="nb-shine"><rect x="-20" y="-10" width="40" height="140" transform="skewX(-20)" fill="url(#${id}-band)"/></g></g>
+      <g clip-path="url(#${id}-clip)"><g class="nb-shine"><rect x="-20" y="4" width="40" height="108" transform="skewX(-20)" fill="url(#${id}-band)"/></g></g>
     </g>
   </svg>`;
   return wrap;

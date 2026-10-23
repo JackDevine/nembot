@@ -38,7 +38,89 @@ function details(title, body) {
   return d;
 }
 
-function sqlBlock(title, sql) { return details(title, el('pre', '', sql)); }
+function sqlBlock(title, sql) { return details(title, codeBlock(sql, 'sql')); }
+
+// Syntax highlighting for SQL: CodeMirror's Lezer parser (MIT, loaded from esm.sh on first use)
+// with marimo's editor colours (the .tok-* rules in app.css). The code shows as plain text at
+// once and is highlighted when the parser arrives.
+const LEZER = { highlight: '1.2.5', sql: '6.10.0' };
+let highlighter = null;
+
+function loadHighlighter() {
+  highlighter ||= Promise.all([
+    import(`https://esm.sh/@lezer/highlight@${LEZER.highlight}`),
+    import(`https://esm.sh/@codemirror/lang-sql@${LEZER.sql}`),
+  ]).then(([{ tags: t, tagHighlighter, highlightCode }, sql]) => ({
+    highlightCode,
+    // Tags to marimo's colour roles. marimo colours SQL functions (avg, range) like keywords.
+    style: tagHighlighter([
+      { tag: [t.keyword, t.operatorKeyword, t.modifier, t.typeName, t.standard(t.name)], class: 'tok-keyword' },
+      { tag: [t.string, t.special(t.string)], class: 'tok-string' },
+      { tag: t.number, class: 'tok-number' },
+      { tag: t.bool, class: 'tok-bool' },
+      { tag: t.null, class: 'tok-null' },
+      { tag: t.operator, class: 'tok-operator' },
+      { tag: t.propertyName, class: 'tok-property' },
+      { tag: [t.comment, t.lineComment, t.blockComment], class: 'tok-comment' },
+    ]),
+    parsers: { sql: sql.PostgreSQL.language.parser },  // DuckDB's SQL is Postgres-like
+  }));
+  return highlighter;
+}
+
+function codeBlock(code, language) {
+  const pre = el('pre', `code lang-${language}`, code);
+  loadHighlighter().then(({ highlightCode, style, parsers }) => {
+    const out = document.createDocumentFragment();
+    highlightCode(code, parsers[language].parse(code), style,
+      (text, classes) => out.append(classes ? el('span', classes, text) : text), () => out.append('\n'));
+    pre.replaceChildren(out);
+  }).catch(() => {});  // offline: the plain text stays
+  return pre;
+}
+
+// JSON (e.g. a Vega-Lite spec) as a collapsible tree in the same colours. Click ▾ to fold an
+// object or array; Alt+click folds or unfolds everything inside it too.
+function jsonTree(value) {
+  const pre = el('pre', 'code json-tree');
+  pre.append(jsonNode(value, null, true));
+  return pre;
+}
+
+function jsonNode(value, key, last) {
+  const label = key === null ? [] : [el('span', 'tok-property', JSON.stringify(key)), ': '];
+  const comma = last ? '' : ',';
+  const isArray = Array.isArray(value);
+  const entries = value !== null && typeof value === 'object' ? (isArray ? value.map(v => [null, v]) : Object.entries(value)) : null;
+  if (!entries || !entries.length) {
+    const line = el('div', 'jt-line');
+    line.append(...label, entries ? (isArray ? '[]' : '{}') : jsonScalar(value), comma);
+    return line;
+  }
+  const [open, close] = isArray ? ['[', ']'] : ['{', '}'];
+  const node = el('details', 'jt');
+  node.open = true;
+  const summary = el('summary');
+  summary.append(...label, open);
+  const noun = isArray ? (entries.length === 1 ? 'item' : 'items') : (entries.length === 1 ? 'key' : 'keys');
+  summary.dataset.folded = ` ${entries.length} ${noun} ${close}${comma}`;
+  summary.onclick = e => {
+    if (!e.altKey) return;
+    e.preventDefault();
+    const unfold = !node.open;
+    for (const d of [node, ...node.querySelectorAll('details')]) d.open = unfold;
+  };
+  const body = el('div', 'jt-body');
+  entries.forEach(([k, v], i) => body.append(jsonNode(v, isArray ? null : k, i === entries.length - 1)));
+  node.append(summary, body, el('div', 'jt-close', close + comma));
+  return node;
+}
+
+function jsonScalar(value) {
+  if (value === null) return el('span', 'tok-null', 'null');
+  const kind = { string: 'tok-string', number: 'tok-number', boolean: 'tok-bool' }[typeof value];
+  return el('span', kind || '', JSON.stringify(value));
+}
 
 // Models write "~$370/MWh" for approximations; GFM would read paired single
 // tildes as strikethrough, so keep strikethrough to the explicit ~~ form.
@@ -107,21 +189,48 @@ function reportLinks(report) {
 function renderPlot(event, actions) {
   const wrap = el('div');
   const spec = el('div');
-  spec.append(el('p', '', 'Data is supplied by the plot SQL above.'), el('pre', '', JSON.stringify(event.plot_spec, null, 2)));
-  wrap.append(withActions(sqlBlock('Plot SQL', event.sql), actions, event.result_id), details('Plot specification', spec));
+  spec.append(el('p', '', 'Data is supplied by the plot SQL above.'), jsonTree(event.plot_spec));
+  // The plot's SQL and its data together (older saved chats have no data here: it was shown at the end).
+  const query = el('div', 'plot-query');
+  query.append(codeBlock(event.sql, 'sql'));
+  if (event.columns) query.append(createDataTable({ columns: event.columns.map(name => ({ name })), rows: event.rows,
+    total: event.total, exportName: event.result_id ? `nembot-${event.result_id}` : 'nembot-plot-data' }));
+  wrap.append(withActions(details(event.columns ? 'Plot SQL and data' : 'Plot SQL', query), actions, event.result_id),
+    details('Plot specification', spec));
   const target = el('div');
   wrap.append(target);
   embedChart(target, event.spec);
   return wrap;
 }
 
-// A Vega-Lite chart in the page's light or dark theme.
+// A Vega-Lite chart in the page's light or dark theme. Charts are redrawn when the browser
+// switches theme; they're tracked weakly, so charts removed from the page are simply freed.
+const darkScheme = matchMedia('(prefers-color-scheme: dark)');
+const themedCharts = new Set();  // WeakRefs to chart targets; each target keeps its spec and view
+
 function embedChart(target, spec) {
-  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-  return vegaEmbed(target, spec, { actions: { export: true, source: false, compiled: false, editor: false },
-    ...(dark && { theme: 'dark', config: { background: 'transparent' } }) })
+  target.nbChart = { spec, view: null };
+  themedCharts.add(new WeakRef(target));
+  return drawChart(target);
+}
+
+function drawChart(target) {
+  const chart = target.nbChart;
+  return vegaEmbed(target, chart.spec, { actions: { export: true, source: false, compiled: false, editor: false },
+    ...(darkScheme.matches && { theme: 'dark', config: { background: 'transparent' } }) })
+    .then(result => { chart.view = result; })
     .catch(err => target.append(el('div', 'error', `Plot failed to render: ${err}`)));
 }
+
+darkScheme.addEventListener('change', () => {
+  for (const ref of [...themedCharts]) {
+    const target = ref.deref();
+    if (!target || !target.isConnected) { themedCharts.delete(ref); continue; }
+    target.nbChart.view?.finalize();  // release the old view's listeners and timers
+    target.replaceChildren();
+    drawChart(target);
+  }
+});
 
 // Read a server-sent event stream of JSON `data:` lines, calling handle(event) for each.
 async function streamEvents(response, handle) {

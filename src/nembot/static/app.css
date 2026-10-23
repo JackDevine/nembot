@@ -51,6 +51,27 @@ header h1 .logo { width: 28px; height: 28px; }
 details.fold { border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 13px; }
 details.fold > summary { cursor: pointer; color: var(--muted); }
 pre { background: var(--bg); padding: 8px; overflow-x: auto; font-size: 12px; }
+/* Code highlighting colours from marimo's CodeMirror themes (light, and its One Dark-style dark
+ * theme), measured from marimo's editor (Apache-2.0; see LICENSES/README.md). */
+:root { --tok-keyword: #770088; --tok-string: #aa1111; --tok-number: #116644; --tok-bool: #221199; --tok-null: #008855;
+  --tok-operator: #aa22ff; --tok-property: #0055aa; --tok-comment: #708090; }
+@media (prefers-color-scheme: dark) {
+  :root { --tok-keyword: #c678dd; --tok-string: #98c379; --tok-number: #d19a66; --tok-bool: #d19a66; --tok-null: #56b6c2;
+    --tok-operator: #56b6c2; --tok-property: #e5c07b; --tok-comment: #6b7280; }
+}
+.plot-query > * + * { margin-top: 8px; }
+pre.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.45; font-variant-ligatures: none; }  /* show >= as typed */
+.tok-keyword { color: var(--tok-keyword); } .tok-string { color: var(--tok-string); } .tok-number { color: var(--tok-number); }
+.tok-bool { color: var(--tok-bool); } .tok-null { color: var(--tok-null); } .tok-operator { color: var(--tok-operator); }
+.tok-property { color: var(--tok-property); } .tok-comment { color: var(--tok-comment); }
+.json-tree { padding-left: 1.7em; }
+.json-tree summary { list-style: none; cursor: pointer; position: relative; border-radius: 3px; }
+.json-tree summary::-webkit-details-marker { display: none; }
+.json-tree summary::before { content: '\25BE'; position: absolute; left: -1.3em; width: 1em; text-align: center; color: var(--muted); }
+.json-tree details:not([open]) > summary::before { content: '\25B8'; }
+.json-tree details:not([open]) > summary::after { content: attr(data-folded); color: var(--muted); }
+.json-tree summary:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.json-tree .jt-body { padding-left: 2ch; }
 table { border-collapse: collapse; font-size: 13px; width: 100%; }
 th, td { border-bottom: 1px solid var(--border); padding: 3px 8px; text-align: left; white-space: nowrap; }
 #form { display: flex; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); max-width: 940px; width: 100%; margin: 0 auto; }

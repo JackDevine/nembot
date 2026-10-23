@@ -391,7 +391,10 @@ def visualize_tool(db, sql: str, plot_spec: str) -> tuple[str, str | None, list[
     except Exception as err:
         return f'Plot rendering failed: {err}. Revise the specification and retry.', None, []
     text = f'Plot created from all {len(result.rows)} rows. First 10 rows:\n{_preview(result)}'
-    events = [{'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': spec}, table_event(result)]
+    # The data travels with the plot (shown under its SQL), not as a separate table at the end of the turn.
+    table = table_event(result)
+    events = [{'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': spec,
+               'columns': table['columns'], 'rows': table['rows'], 'total': table['total']}]
     return text, base64.standard_b64encode(png).decode(), events
 
 
@@ -699,7 +702,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                     results.append(result)
                     continue
                 result, events = await execute_tool(db, call)
-                if not result['is_error'] and any(e['type'] == 'table' for e in events):
+                if not result['is_error'] and any(e['type'] in ('table', 'plot') for e in events):
                     # Number the result so the model can place it in a report.
                     rid = f'R{len(conversation.results) + 1}'
                     plot = next((e for e in events if e['type'] == 'plot'), None)

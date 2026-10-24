@@ -188,6 +188,25 @@ class IngestTests(unittest.TestCase):
         with duckdb.connect(str(self.database)) as connection:
             return connection.execute(query, parameters or []).fetchall()
 
+    def test_shared_connection_survives_spilled_queries_between_loads(self):
+        # The web app runs every download on one shared connection. Once DuckDB has spilled to
+        # its temp directory, it can't be switched, so loads must not try to set their own.
+        self.network.add_file("DISPATCHPRICE", 2024, 2, [price_row()])
+        self.database.parent.mkdir(parents=True)
+        shared = duckdb.connect(str(self.database))
+        self.addCleanup(shared.close)
+        shared.execute("SET memory_limit='64MB'; SET threads=1; SET preserve_insertion_order=false")
+        shared.execute("SELECT count(*) FROM (SELECT md5(range::VARCHAR) AS m FROM range(3000000) ORDER BY m)")
+        self.assertTrue(Path(str(self.database) + ".tmp").exists())  # it really spilled
+        nemweb.clear_cache()
+        with redirect_stdout(self.stdout), redirect_stderr(self.stderr):
+            load_mms(("DISPATCHPRICE",), "2024-02-01", "2024-02-29", database=self.database, cache_dir=self.cache,
+                     connection=shared)
+            nemweb.clear_cache()
+            load_mms(("DISPATCHPRICE",), "2024-02-01", "2024-02-29", database=self.database, cache_dir=self.cache,
+                     connection=shared)
+        self.assertEqual(shared.execute("SELECT count(*) FROM DISPATCHPRICE").fetchall(), [(1,)])
+
     def test_all_tables_multipart_known_subsets_and_typed_values(self):
         first = self.network.add_file("DISPATCHPRICE", 2024, 2, [price_row()])
         second = self.network.add_file("DISPATCHPRICE", 2024, 2, [price_row("2024/02/01 00:10:00", RRP="")], part=2)

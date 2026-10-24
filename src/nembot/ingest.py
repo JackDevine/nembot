@@ -249,8 +249,9 @@ def load_mms(
         for name in names:
             _create_table(c, TABLES[name])
         references = []
+        # Scratch space for unzipped CSVs. DuckDB spills to its own temp directory beside the
+        # database: on the app's shared connection it can't be switched once it has been used.
         with tempfile.TemporaryDirectory(prefix='staging-', dir=cache) as scratch:
-            c.execute('SET temp_directory=?', [scratch])
             current = {}
 
             def on_bytes(url, n):  # only the file being waited for reports progress
@@ -314,7 +315,6 @@ def load_mms(
                 _diagnostics(c, names, lower, upper)
             finally:
                 downloads.close()
-                c.execute('RESET temp_directory')  # the scratch directory is about to be deleted
         try:
             c.execute('CHECKPOINT')
         except duckdb.Error:

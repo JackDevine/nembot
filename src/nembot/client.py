@@ -28,11 +28,16 @@ def parquet_bytes(connection: duckdb.DuckDBPyConnection, sql: str) -> bytes:
 
 
 def query(sql: str, url: str = 'http://127.0.0.1:8000', database: str = 'data/nem.duckdb') -> pl.DataFrame:
+    return pl.read_parquet(io.BytesIO(query_parquet(sql, url, database)))
+
+
+def query_parquet(sql: str, url: str = 'http://127.0.0.1:8000', database: str = 'data/nem.duckdb') -> bytes:
+    """The result of one SELECT as Parquet bytes, from the app or else the file."""
     request = urllib.request.Request(url.rstrip('/') + '/api/query', data=json.dumps({'sql': sql}).encode(),
                                      headers={'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
-            return pl.read_parquet(io.BytesIO(response.read()))
+            return response.read()
     except urllib.error.HTTPError as exc:
         try:
             message = json.loads(exc.read()).get('error')
@@ -42,4 +47,4 @@ def query(sql: str, url: str = 'http://127.0.0.1:8000', database: str = 'data/ne
     except urllib.error.URLError:
         pass  # the app isn't running: read the file directly
     with duckdb.connect(database, read_only=True) as connection:
-        return pl.read_parquet(io.BytesIO(parquet_bytes(connection, sql)))
+        return parquet_bytes(connection, sql)

@@ -16,8 +16,10 @@
  * labels and pills, the context menu, column visibility, text wrapping, the row viewer,
  * column summary charts, search, export and pagination follow marimo. Added here:
  * Ctrl/⌘+arrow jumps to the edge of the page's rows or visible columns (Shift extends the
- * selection). Not ported: frozen columns, the column explorer, row selection checkboxes
- * and virtualisation.
+ * selection), and "Chart this" for a cell range (selection bar or right-click): a Vega-Lite chart
+ * of the selected cells, or of every row of the selected columns, with chart type, x axis, series
+ * and aggregate choices. Not ported: frozen columns, the column explorer, row selection
+ * checkboxes and virtualisation.
  *
  * Icons are Lucide icons (ISC licence, see LICENSES/lucide-LICENSE.txt), as used by marimo.
  *
@@ -43,6 +45,7 @@ const MO_ICONS = {
   'chevron-down': '<path d="m6 9 6 6 6-6"/>',
   'search': '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
   'x': '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  'chart-line': '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/>',
   'download': '<path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/>',
   'copy': '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   'funnel': '<path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/>',
@@ -458,6 +461,152 @@ function moFormatStat(n) {  // marimo cell-selection-stats: 3 decimals, locale g
 
 function moIsInteractive(target) {
   return target.closest('input, button, select, textarea, a, label, [role="checkbox"], [role="button"], [contenteditable="true"]');
+}
+
+// ---- "Chart this" (nembot addition, not in marimo): a Vega-Lite chart of selected cells ----
+
+const MO_CHART_ROWS = 5000;  // "all rows" charts at most this many (the explorer allows this page size)
+const MO_CHART_MARKS = ['line', 'bar', 'point', 'area'];
+const MO_CHART_AGGREGATES = ['none', 'sum', 'mean', 'min', 'max', 'count'];
+
+// Vega-Lite reads "." and "[" in field names as nested access: column names like max(s.RRP) need escaping.
+function moField(name) { return name.replace(/[.[\]\\]/g, '\\$&'); }
+
+function moIsTime(column) { return column.type === 'date' || column.type === 'datetime'; }
+
+// A first guess at a sensible chart for these columns and rows.
+function moChartDefaults(columns, rows) {
+  const measures = columns.filter(c => c.type === 'number');
+  const dims = columns.filter(c => c.type !== 'number');
+  const x = dims[0] || (measures.length >= 2 ? measures[0] : null);  // null: plot against the row number
+  const ys = measures.filter(c => c !== x).map(c => c.name);
+  const series = ys.length <= 1 ? dims.find(c => c !== x) : null;
+  let mark = 'bar';
+  if (!x) mark = rows.length > 50 ? 'line' : 'bar';
+  else if (moIsTime(x)) mark = 'line';
+  else if (x.type === 'number') mark = ys.length === 1 ? 'point' : 'line';
+  // Repeated x values (per series) would draw on top of each other: average them instead.
+  let aggregate = ys.length ? 'none' : 'count';
+  if (ys.length && x && !moIsTime(x) && x.type !== 'number') {
+    const keys = rows.map(r => `${r[columns.indexOf(x)]}\u0000${series ? r[columns.indexOf(series)] : ''}`);
+    if (new Set(keys).size < keys.length) aggregate = 'mean';
+  }
+  return { x: x ? x.name : '', series: series ? series.name : '', mark, aggregate, ys };
+}
+
+function moChartSpec(columns, rows, choice) {
+  const values = rows.map((row, n) => {
+    const record = { '#': n + 1 };
+    columns.forEach((c, i) => {
+      const v = row[i];
+      record[c.name] = moIsTime(c) && typeof v === 'string' ? v.replace(' ', 'T') : v;  // ISO, so every browser parses it
+    });
+    return record;
+  });
+  const xColumn = columns.find(c => c.name === choice.x);
+  const xType = !xColumn || xColumn.type === 'number' ? 'quantitative' : moIsTime(xColumn) ? 'temporal' : 'nominal';
+  const agg = choice.aggregate === 'none' ? undefined : choice.aggregate;
+  const encoding = { x: { field: xColumn ? moField(xColumn.name) : '#', type: xType, title: xColumn ? xColumn.name : 'Row' } };
+  if (xType === 'nominal') encoding.x.sort = null;  // keep the table's order
+  const spec = { $schema: 'https://vega.github.io/schema/vega-lite/v6.json', width: 540, height: 300,
+    data: { values }, mark: { type: choice.mark, tooltip: true }, encoding };
+  if (choice.mark === 'line' && rows.length <= 60) spec.mark.point = true;
+  const ys = choice.ys;
+  if (choice.aggregate === 'count' || !ys.length) {
+    encoding.y = { aggregate: 'count', type: 'quantitative', title: 'Count' };
+  } else if (ys.length === 1) {
+    encoding.y = { field: moField(ys[0]), type: 'quantitative', aggregate: agg, title: agg ? `${agg} of ${ys[0]}` : ys[0] };
+  } else {  // several numeric columns: one series each
+    spec.transform = [{ fold: ys.map(moField), as: ['series', 'value'] }];
+    encoding.y = { field: 'value', type: 'quantitative', aggregate: agg, title: agg ? `${agg} of value` : 'Value' };
+    encoding.color = { field: 'series', type: 'nominal', title: null };
+  }
+  if (choice.series && ys.length <= 1) encoding.color = { field: moField(choice.series), type: 'nominal', title: choice.series };
+  if (choice.mark === 'bar' && xType === 'nominal' && encoding.color) encoding.xOffset = { field: encoding.color.field };  // grouped, not stacked
+  if (choice.mark === 'line' || choice.mark === 'point') encoding.y.scale = { zero: false };
+  return spec;
+}
+
+// The dialog: rows (selection or all), chart type, x, series and aggregate, the chart, and the spec to copy.
+function moChartDialog({ columns, selected, total, allRows }) {
+  const backdrop = el('div', 'modal-backdrop');
+  const box = el('div', 'modal mo-chart-dialog');
+  const close = () => {
+    backdrop.remove();
+    document.removeEventListener('keydown', onKey);
+    window.removeEventListener('hashchange', close);
+  };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  window.addEventListener('hashchange', close);  // navigating away closes it
+  backdrop.onclick = e => { if (e.target === backdrop) close(); };
+
+  let rows = selected, note = '';
+  let choice = moChartDefaults(columns, rows);
+  const chosen = new Set();  // settings the user picked; the rest follow the rows (e.g. bars for 10 rows, a line for 5,000)
+  const pick = (key, value) => { choice[key] = value; chosen.add(key); };
+  const select = (label, options, value, onChange) => {
+    const field = el('label', 'mo-field');
+    const control = el('select');
+    for (const [v, text] of options) { const o = el('option', '', text); o.value = v; control.append(o); }
+    control.value = value;
+    control.onchange = () => onChange(control.value);
+    field.append(el('span', '', label), control);
+    return field;
+  };
+  const controls = el('div', 'mo-chart-controls');
+  const target = el('div', 'mo-chart-target');
+  const status = el('div', 'muted mo-chart-note');
+  let spec = null;
+  const draw = () => {
+    const dims = columns.filter(c => c.name !== choice.x && c.type !== 'number');
+    controls.replaceChildren(
+      select('Rows', [['selected', `Selected cells (${selected.length.toLocaleString()} rows)`],
+        ['all', `All ${Math.min(total, MO_CHART_ROWS).toLocaleString()} rows of these columns`]],
+        rows === selected ? 'selected' : 'all', async value => {
+          if (value === 'all') {
+            status.textContent = 'Loading rows…';
+            try {
+              const data = await allRows();
+              rows = data.rows;
+              note = data.total > rows.length ? `Showing the first ${rows.length.toLocaleString()} of ${data.total.toLocaleString()} rows.` : '';
+            } catch (err) { status.textContent = `Couldn't load the rows: ${err.message}`; return; }
+          } else { rows = selected; note = ''; }
+          const fresh = moChartDefaults(columns, rows);
+          for (const key of ['mark', 'x', 'series', 'aggregate']) if (!chosen.has(key)) choice[key] = fresh[key];
+          choice.ys = columns.filter(c => c.type === 'number' && c.name !== choice.x).map(c => c.name);
+          draw();
+        }),
+      select('Chart', MO_CHART_MARKS.map(m => [m, m[0].toUpperCase() + m.slice(1)]), choice.mark, v => { pick('mark', v); draw(); }),
+      select('X axis', [['', 'Row number'], ...columns.map(c => [c.name, c.name])], choice.x, v => {
+        pick('x', v);
+        choice.ys = columns.filter(c => c.type === 'number' && c.name !== v).map(c => c.name);
+        if (choice.series === v) choice.series = '';
+        draw();
+      }),
+      select('Series', [['', 'None'], ...dims.map(c => [c.name, c.name])], choice.series, v => { pick('series', v); draw(); }),
+      select('Aggregate', MO_CHART_AGGREGATES.map(a => [a, a === 'none' ? 'None' : a]), choice.aggregate, v => { pick('aggregate', v); draw(); }),
+    );
+    spec = moChartSpec(columns, rows, choice);
+    status.textContent = [note, choice.ys.length > 1 && choice.series ? 'Series is ignored when several numeric columns are charted.' : ''].filter(Boolean).join(' ');
+    target.replaceChildren();
+    if (typeof embedChart === 'function') embedChart(target, spec);
+    else if (typeof vegaEmbed === 'function') vegaEmbed(target, spec);
+  };
+
+  const head = el('div', 'mo-chart-head');
+  const x = el('button', 'mo-icon-button'); x.type = 'button'; x.title = 'Close'; x.append(moIcon('x', 16)); x.onclick = close;
+  head.append(el('h3', '', `Chart of ${columns.map(c => c.name).join(', ')}`), x);
+  const copy = el('button', '', 'Copy Vega-Lite spec');
+  copy.title = 'The chart with its data, for a notebook or the Vega editor';
+  copy.onclick = () => navigator.clipboard.writeText(JSON.stringify(spec, null, 1)).then(() => moToast('Copied Vega-Lite spec'));
+  const done = el('button', 'primary', 'Close'); done.onclick = close;
+  const buttons = el('div', 'buttons'); buttons.append(copy, done);
+  box.append(head, controls, target, status, buttons);
+  backdrop.append(box);
+  document.body.append(backdrop);
+  draw();
+  done.focus();
 }
 
 function createDataTable(options) {
@@ -1052,6 +1201,30 @@ function createDataTable(options) {
       parts.push(['Sum', moFormatStat(sum)], ['Average', moFormatStat(sum / numbers.length)]);
     }
     for (const [label, value] of parts) stats.append(el('span', '', `${label}: ${value}`));
+    const chart = el('button', 'mo-icon-button mo-chart-button');
+    chart.type = 'button'; chart.title = 'Chart this: plot the selected cells';
+    chart.append(moIcon('chart-line', 14), el('span', '', 'Chart'));
+    chart.onclick = chartSelection;
+    stats.append(chart);
+  }
+
+  // "Chart this" for the selected range: those cells, or (on request) every row of its columns.
+  function chartSelection() {
+    const rect = selectedRect();
+    if (!rect) return;
+    const cols = visible().slice(rect.c1, rect.c2 + 1);
+    const pick = row => cols.map(c => row[c.index]);
+    moChartDialog({
+      columns: cols,
+      selected: state.rows.slice(rect.r1, rect.r2 + 1).map(pick),
+      total: state.total,
+      allRows: async () => {
+        if (!server) return { rows: clientView().slice(0, MO_CHART_ROWS).map(pick), total: state.total };
+        const page = await options.fetchPage({ offset: 0, limit: MO_CHART_ROWS, sort: state.sort, search: state.search,
+          filters: state.filters });
+        return { rows: page.rows.map(pick), total: page.total };
+      },
+    });
   }
 
   function cellAt(target) {
@@ -1151,6 +1324,7 @@ function createDataTable(options) {
     moMenu(cell.td, [
       { icon: 'copy', text: 'Copy cell', onClick: () => copyText(moText(value)) },
       selectedCount() > 1 && { icon: 'clipboard-copy', text: 'Copy selected cells', onClick: copySelection },
+      selectedCount() > 1 && { icon: 'chart-line', text: 'Chart this', onClick: chartSelection },
       filterable && 'separator',
       filterable && { icon: 'funnel', text: 'Filter by this value', onClick: () => setFilter({ column: column.name, operator: 'in', values: [value] }) },
       filterable && { icon: 'funnel-x', text: 'Remove rows with this value', onClick: () => setFilter({ column: column.name, operator: 'not_in', values: [value] }) },

@@ -7,6 +7,7 @@ const explorer = {
   detail: null,        // /api/explorer/tables/<name> response
   query: null,         // data-view filters and paging
   docsExpanded: new Set(),  // tables whose docs are shown in full
+  page: 'table',       // or 'sql': the SQL editor (sqleditor.js)
 };
 const packageList = document.getElementById('package-list');
 const tableView = document.getElementById('table-view');
@@ -172,7 +173,14 @@ function drawTable() {
     : `What does the ${d.name} table contain, and what questions could it help me answer?`);
   title.append(el('h2', '', d.name), el('span', 'badge', KIND_LABELS[d.kind]),
     el('span', d.downloaded ? 'badge ok' : 'badge missing', d.downloaded ? 'downloaded' : 'not downloaded'),
-    el('span', 'spacer'), el('span', 'actions'), ask);
+    el('span', 'spacer'), el('span', 'actions'));
+  if (d.downloaded) {
+    const editor = el('button', '', 'SQL editor');
+    editor.title = `Write your own query, starting from ${d.name}`;
+    editor.onclick = () => { location.hash = `#explorer/${encodeURIComponent(d.name)}/sql`; };
+    title.append(editor);
+  }
+  title.append(ask);
   tableView.append(title, el('p', 'comment', d.comment));
   drawActions(d, title.querySelector('.actions'));
 
@@ -355,13 +363,23 @@ onDownloadsChange(async finished => {
   loadFreshness();
 });
 
-async function showExplorer(name) {
+// ``route`` is '<TABLE>' (its page) or '<TABLE>/sql' (the SQL editor, sqleditor.js).
+async function showExplorer(route) {
+  const [name, page] = (route || '').split('/');
   try {
     if (!explorer.overview) {
       explorer.overview = await getJSON('/api/explorer');
       loadFreshness();
     }
-    if (name !== explorer.current || !explorer.detail) {
+    if (page === 'sql' && name) {
+      explorer.current = name;
+      explorer.page = 'sql';
+      drawCatalog();
+      return drawSqlEditor(name);
+    }
+    const fromEditor = explorer.page === 'sql';
+    explorer.page = 'table';
+    if (!name || name !== explorer.detail?.name) {
       explorer.current = name;
       explorer.detail = null;
       explorer.query = { offset: 0, limit: 25, start: '', end: '', values: {} };
@@ -372,6 +390,9 @@ async function showExplorer(name) {
       } else {
         tableView.replaceChildren(el('p', 'empty', 'Choose a table on the left. Faded tables have not been downloaded yet.'));
       }
+    } else if (fromEditor) {  // back from the SQL editor: the same table, filters and page as before
+      explorer.current = name;
+      drawTable();
     }
     drawCatalog();
   } catch (err) {

@@ -20,3 +20,6 @@ plugins/.drafts/
 plugins/.backup/
 plugins/.state.json
 plugins/*/data/
+
+# The private eval set and its tooling: a separate git repository (see plugins/evals/CLAUDE.md)
+plugins/evals/

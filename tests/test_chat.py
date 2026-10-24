@@ -1,7 +1,9 @@
 """Provider-neutral chat history, rendering and the turn loop (no network)."""
 import asyncio
+import json
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
@@ -9,7 +11,8 @@ from unittest.mock import patch
 import duckdb
 
 from nembot import claude, openrouter
-from nembot.chat import NO_VISION_BLURB, Conversation, query_tool, run_turn, system_prompt, text_from_blocks
+from nembot.chat import (NO_VISION_BLURB, STOPPED, Conversation, keep_branch, query_tool, run_compare, run_single, run_turn,
+                         stop_turn, system_prompt, rerun_chart, text_from_blocks, visualize_tool)
 from nembot.models import ModelInfo
 
 OPUS = ModelInfo('claude:claude-opus-5-5', 'claude', 'claude-opus-5-5', 'Claude Opus 5.5', True, True, True)
@@ -138,6 +141,141 @@ class DatabaseCase(unittest.TestCase):
         async def collect():
             return [e async for e in run_turn({'openrouter': provider}, self.db, conversation, text, GLM)]
         return asyncio.run(collect())
+
+
+class LargePlots(DatabaseCase):
+    def test_every_row_is_plotted_without_validating_each_one(self):
+        spec = json.dumps({'mark': 'line', 'encoding': {'x': {'field': 'i', 'type': 'quantitative'},
+                                                        'y': {'field': 'v', 'type': 'quantitative'}}})
+        started = time.monotonic()
+        text, image, events = visualize_tool(self.db, 'SELECT i, i * 2 AS v FROM range(30000) t(i)', spec)
+        self.assertLess(time.monotonic() - started, 20)  # validating every row took minutes
+        self.assertTrue(image)
+        self.assertEqual(text.split('.')[0], 'Plot created from all 30000 rows')
+        (rows,) = events[0]['spec']['datasets'].values()
+        self.assertEqual((len(rows), rows[-1]), (30000, {'i': 29999, 'v': 59998}))
+
+    def test_saved_charts_are_rerun_from_sql(self):
+        event = rerun_chart(self.db, 'SELECT i, i * 2 AS v FROM range(3) t(i)', {'mark': 'line', 'encoding': {
+            'x': {'field': 'i', 'type': 'quantitative'}, 'y': {'field': 'v', 'type': 'quantitative'}}})
+        self.assertEqual((event['type'], event['total'], event['rows']), ('plot', 3, [[0, 0], [1, 2], [2, 4]]))
+        (rows,) = event['spec']['datasets'].values()
+        self.assertEqual(len(rows), 3)
+        self.assertIn('error', rerun_chart(self.db, 'DROP TABLE x', {'mark': 'line'}))
+        self.assertIn('Omit data', rerun_chart(self.db, 'SELECT 1', {'mark': 'line', 'data': {'url': 'http://x'}})['error'])
+
+
+class Hanging:
+    """Streams some text (or asks for a tool), then hangs until cancelled, like a slow model."""
+
+    def __init__(self, text='Prices peaked', tool=False):
+        self.text, self.tool = text, tool
+
+    async def respond(self, model, history, **options):
+        if self.tool and history[-1]['role'] == 'user':
+            yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': 'Let me check.', 'raw': {},
+                   'tool_calls': [{'id': 't1', 'name': 'query_mms', 'input': {'sql': 'SELECT 1'}}], 'stop': 'tool_use'}
+            return
+        yield {'type': 'text', 'delta': self.text}
+        await asyncio.Event().wait()  # never set: only cancellation ends this
+        yield {'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': self.text, 'raw': {},
+               'tool_calls': [], 'stop': 'end'}
+
+
+class StopTurns(DatabaseCase):
+    def stop_after(self, events_before_stop, run, conversation, branch=None):
+        """Collect a turn's events, stopping it (or one branch) once ``events_before_stop`` have arrived."""
+        async def go():
+            events = []
+            async for event in run:
+                events.append(event)
+                if len(events) == events_before_stop:
+                    self.assertTrue(stop_turn(conversation, branch))
+            return events
+        return asyncio.run(asyncio.wait_for(go(), 10))
+
+    def test_stop_keeps_what_was_written_and_says_it_was_stopped(self):
+        conversation = Conversation()
+        events = self.stop_after(1, run_single({'openrouter': Hanging()}, self.db, conversation, 'q', GLM), conversation)
+        self.assertEqual(events, [{'type': 'text', 'delta': 'Prices peaked'}, {'type': 'stopped'}])
+        self.assertEqual([h['role'] for h in conversation.history], ['user', 'assistant'])
+        self.assertEqual(conversation.history[-1]['text'], f'Prices peaked\n\n{STOPPED}')
+        self.assertEqual(conversation.running, {})
+        self.run_turn(FakeProvider(), conversation, 'carry on')  # the chat continues normally
+        self.assertEqual([h['role'] for h in conversation.history][-3:], ['assistant', 'tool', 'assistant'])
+
+    def test_stop_during_a_tool_drops_the_unanswered_call(self):
+        async def slow_tool(db, call):
+            await asyncio.Event().wait()
+        conversation = Conversation()
+        with patch('nembot.chat.execute_tool', slow_tool):
+            events = self.stop_after(1, run_single({'openrouter': Hanging(tool=True)}, self.db, conversation, 'q', GLM),
+                                     conversation)
+        self.assertEqual([e['type'] for e in events], ['tool_running', 'stopped'])
+        self.assertEqual([h['role'] for h in conversation.history], ['user', 'assistant'])
+        self.assertEqual(conversation.history[-1]['tool_calls'], [])
+        self.assertEqual(conversation.history[-1]['text'], f'Let me check.\n\n{STOPPED}')
+
+    def test_leaving_without_stop_forgets_the_turn(self):
+        conversation = Conversation()
+
+        async def go():
+            run = run_single({'openrouter': Hanging()}, self.db, conversation, 'q', GLM)
+            await run.__anext__()
+            await run.aclose()  # the browser went away
+        asyncio.run(go())
+        self.assertEqual(conversation.history, [])
+        self.assertEqual(conversation.running, {})
+
+    def test_stopping_one_compared_model_lets_the_others_finish(self):
+        conversation = Conversation()
+        providers = {'claude': Hanging('Opus says'), 'openrouter': FakeProvider()}
+        run = run_compare(providers, self.db, conversation, 'q', [OPUS, GLM])
+
+        async def go():
+            events = []
+            async for event in run:
+                events.append(event)
+                if event == {'type': 'text', 'delta': 'Opus says', 'branch': 0}:
+                    self.assertTrue(stop_turn(conversation, 0))
+            return events
+        events = asyncio.run(asyncio.wait_for(go(), 10))
+        self.assertIn({'type': 'stopped', 'branch': 0}, events)
+        self.assertEqual(sorted(e['branch'] for e in events if e['type'] == 'branch_done'), [0, 1])
+        self.assertEqual(events[-1], {'type': 'kept', 'branch': 1})  # the model that wasn't stopped
+        self.assertEqual(conversation.branches[0]['history'][-1]['text'], f'Opus says\n\n{STOPPED}')
+        self.assertTrue(keep_branch(conversation, 0))  # a stopped reply can still be chosen
+
+
+class CompareTurns(DatabaseCase):
+    def compare(self, conversation, providers, models, text='question'):
+        async def collect():
+            return [e async for e in run_compare(providers, self.db, conversation, text, models)]
+        return asyncio.run(collect())
+
+    def test_each_model_answers_on_its_own_branch_and_the_first_is_kept(self):
+        conversation = Conversation()
+        self.run_turn(FakeProvider(), conversation, 'first')  # R1 already taken
+        events = self.compare(conversation, {'claude': FakeProvider(), 'openrouter': FakeProvider()}, [OPUS, GLM])
+        self.assertEqual(events[0]['type'], 'compare')
+        self.assertEqual([m['ref'] for m in events[0]['models']], [OPUS.ref, GLM.ref])
+        self.assertEqual(events[-1], {'type': 'kept', 'branch': 0})
+        tables = [e for e in events if e['type'] == 'table']
+        self.assertEqual(sorted((e['branch'], e['result_id']) for e in tables), [(0, 'R2'), (1, 'R2')])
+        self.assertEqual(len(conversation.history), 8)
+        self.assertEqual(conversation.history[-1]['model'], OPUS.ref)
+        self.assertTrue(keep_branch(conversation, 1))
+        self.assertEqual(conversation.history[-1]['model'], GLM.ref)
+        self.assertEqual(conversation.history[:4], conversation.branches[0]['history'][:4])
+        self.assertFalse(keep_branch(conversation, 2))
+
+    def test_a_failing_model_is_reported_and_never_kept(self):
+        conversation = Conversation()
+        events = self.compare(conversation, {'claude': FakeProvider(fail=True), 'openrouter': FakeProvider()}, [OPUS, GLM])
+        self.assertIn({'type': 'error', 'message': 'provider down', 'branch': 0}, events)
+        self.assertEqual(events[-1], {'type': 'kept', 'branch': 1})
+        self.assertEqual(conversation.history[-1]['model'], GLM.ref)
+        self.assertFalse(keep_branch(conversation, 0))
 
 
 class TurnLoop(DatabaseCase):

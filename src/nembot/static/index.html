@@ -53,16 +53,20 @@
       <div class="list" id="model-list"></div>
     </div>
     <form id="form">
-      <div>
+      <div class="composer-tools">
         <div class="mode-switch" role="group" aria-label="Chat mode">
           <button type="button" data-mode="analyst" title="Ask questions about NEM data">Analyst</button>
           <button type="button" data-mode="creator" title="Build or change plugins that add features to nembot">Creator</button>
         </div>
         <button type="button" id="model-button" title="Choose model">Loading models…</button>
+        <span id="compare-chips" hidden></span>
         <label class="toggle" title="Let the model search the web for context (billed per search)."><input type="checkbox" id="web-search"> Web search</label>
       </div>
-      <textarea id="input" rows="2" placeholder="Ask about NEM prices, demand or generation…"></textarea>
-      <button class="primary" id="send">Send</button>
+      <div class="composer-input">
+        <textarea id="input" rows="2" placeholder="Ask about NEM prices, demand or generation…"></textarea>
+        <button class="primary" id="send">Send</button>
+        <button type="button" id="stop" class="stop" title="Stop the reply" hidden>■ Stop</button>
+      </div>
     </form>
     <div id="chat-stats" class="chat-stats" hidden></div>
   </div>
@@ -119,6 +123,7 @@
 <script src="/static/downloads.js"></script>
 <script src="/static/chat.js"></script>
 <script src="/static/explorer.js"></script>
+<script src="/static/sqleditor.js"></script>
 <script src="/static/snippets.js"></script>
 <script src="/static/docs.js"></script>
 <script src="/static/chats.js"></script>
@@ -132,7 +137,9 @@ function route() {
   const name = ['chat', 'explorer', 'docs', 'snippets', 'reports', 'plugins', 'plugin'].includes(view) ? view : 'chat';
   const section = name === 'plugin' ? 'plugin-view-section' : `${name}-view`;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === section));
-  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === (name === 'plugin' ? hash : name)));
+  // A plugin tab's own pages (#plugin/<plugin>/<tab>/...) keep its link highlighted.
+  const active = name === 'plugin' ? hash.split('/').slice(0, 3).join('/') : name;
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.view === active));
   if (name === 'chat') showChat(rest.join('/') || null);
   if (name === 'explorer') showExplorer(rest.join('/') || null);
   if (name === 'docs') showDocs(rest.join('/') || null);

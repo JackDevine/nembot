@@ -64,6 +64,53 @@ class Explorer(unittest.TestCase):
 
 
 
+class SqlEditor(Explorer):
+    def test_runs_one_select_and_returns_the_first_rows(self):
+        data = explorer.run_sql(self.db, "SELECT REGIONID, max(RRP) AS top FROM DISPATCHPRICE GROUP BY 1 ORDER BY 1")
+        self.assertEqual((data['columns'], data['rows'], data['truncated']), (['REGIONID', 'top'], [['NSW1', 577.0], ['SA1', 577.0]], False))
+        capped = explorer.run_sql(self.db, 'SELECT * FROM DISPATCHPRICE', limit=10)
+        self.assertEqual((len(capped['rows']), capped['truncated']), (10, True))
+        self.assertIsInstance(capped['rows'][0][0], str)  # timestamps as text for the browser
+
+    def test_rejects_anything_but_one_select(self):
+        for sql in ('DELETE FROM DISPATCHPRICE', 'SELECT 1; SELECT 2', 'CREATE TABLE x AS SELECT 1'):
+            with self.assertRaises(ValueError):
+                explorer.run_sql(self.db, sql)
+        with self.assertRaises(duckdb.Error):
+            explorer.run_sql(self.db, 'SELECT nope FROM DISPATCHPRICE')
+
+    def test_check_underlines_what_duckdb_rejects_without_running_it(self):
+        def check(sql):
+            return [(sql[p['from']:p['to']], p['message'].split(':')[0]) for p in explorer.check_sql(self.db, sql)]
+        self.assertEqual(check('SELECT REGIONID, max(RRP) FROM DISPATCHPRICE GROUP BY ALL'), [])  # DuckDB-only syntax
+        self.assertEqual(check('SELECT * FROM DISPATCHPRICE QUALIFY row_number() OVER (PARTITION BY REGIONID) = 1'), [])
+        self.assertEqual(check('SELECT REGIONID,\n  PRICE\nFROM DISPATCHPRICE'), [('PRICE', 'Binder Error')])
+        self.assertEqual(check('SELECT avgg(RRP) FROM DISPATCHPRICE'), [('avgg', 'Catalog Error')])
+        self.assertEqual(check('SELECT * FROM DISPATCHPRICES'), [('DISPATCHPRICES', 'Catalog Error')])
+        self.assertEqual(check('SELEC * FROM DISPATCHPRICE'), [('SELEC', 'Parser Error')])
+        self.assertEqual(check('SELECT * FROM DISPATCHPRICE WHERE'), [('WHERE', 'Parser Error')])
+        self.assertEqual(check('SELECT 1; SELECT 2'), [('SELECT 2', 'Only one query at a time')])
+        self.assertEqual(check('DELETE FROM DISPATCHPRICE')[0][1], 'Only SELECT queries can run here (the editor is read-only).')
+        self.assertEqual(check('  '), [])
+
+    def test_functions_have_signatures_and_help(self):
+        functions = {f['name']: f for f in explorer.functions(self.db)}
+        self.assertIn('date_trunc(part VARCHAR, timestamp TIMESTAMP) → TIMESTAMP', functions['date_trunc']['signatures'])
+        self.assertTrue(functions['avg']['description'])
+        self.assertEqual(functions['avg']['type'], 'aggregate')
+        self.assertFalse([name for name in functions if not name[0].isalpha()])  # no operators or internals
+
+    def test_rows_allow_the_chart_page_size_but_snap_others(self):
+        self.assertEqual(explorer.rows(self.db, 'DISPATCHPRICE', limit=explorer.CHART_ROWS)['limit'], explorer.CHART_ROWS)
+        self.assertEqual(len(explorer.rows(self.db, 'DISPATCHPRICE', limit=explorer.CHART_ROWS)['rows']), 1154)
+        self.assertEqual(explorer.rows(self.db, 'DISPATCHPRICE', limit=777)['limit'], 25)
+
+    def test_schema_lists_downloaded_tables_with_catalogue_columns(self):
+        schema = explorer.schema(self.db)
+        self.assertEqual(list(schema), ['DISPATCHPRICE'])
+        self.assertEqual(schema['DISPATCHPRICE'][:3], ['SETTLEMENTDATE', 'RUNNO', 'REGIONID'])
+
+
 class Filters(Explorer):
     def total(self, filters=None, search=None):
         return explorer.rows(self.db, 'DISPATCHPRICE', filters=filters, search=search)['total']

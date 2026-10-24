@@ -21,7 +21,7 @@ from . import chats, client, docs, downloads, explorer, live, plugins, reports, 
 from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
-from .chat import Conversation, run_turn
+from .chat import MAX_COMPARE, Conversation, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
 from .claude import ClaudeProvider
 from .models import DEFAULT_MODEL, Catalog, public
 from .openrouter import OpenRouterProvider
@@ -113,12 +113,22 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         conversation_id = str(body.get('conversation', ''))
         if not text or not conversation_id:
             return JSONResponse({'error': 'message and conversation are required'}, status_code=400)
-        model = await catalog.get(str(body.get('model') or DEFAULT_MODEL))
-        if model is None:
-            return JSONResponse({'error': 'unknown model'}, status_code=400)
-        if not model.tools or not model.available:
-            return JSONResponse({'error': f'{model.name} cannot be used for this chat'}, status_code=400)
+        # Several models answer side by side (a compare turn); the first is the chat's model.
+        refs = body.get('models') or [body.get('model') or DEFAULT_MODEL]
+        if not isinstance(refs, list) or len(set(map(str, refs))) != len(refs) or not 1 <= len(refs) <= MAX_COMPARE:
+            return JSONResponse({'error': f'choose 1 to {MAX_COMPARE} different models'}, status_code=400)
+        chosen = []
+        for ref in refs:
+            model = await catalog.get(str(ref))
+            if model is None:
+                return JSONResponse({'error': f'unknown model {ref}'}, status_code=400)
+            if not model.tools or not model.available:
+                return JSONResponse({'error': f'{model.name} cannot be used for this chat'}, status_code=400)
+            chosen.append(model)
+        model = chosen[0]
         mode = 'creator' if body.get('mode') == 'creator' else 'analyst'
+        if len(chosen) > 1 and mode == 'creator':  # the models would overwrite each other's plugin drafts
+            return JSONResponse({'error': 'Creator mode works with one model at a time'}, status_code=400)
         web_search = bool(body.get('web_search'))
         saved = None
         if conversation_id not in conversations:  # a saved chat reopened after a restart
@@ -145,20 +155,27 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             turn = {'text': text, 'events': shown}
 
             def store():
-                chats.save(db, conversation_id, mode=conversation.mode, web_search=web_search, model=model.ref,
+                kept = next((e['branch'] for e in shown if e['type'] == 'kept'), None)
+                chats.save(db, conversation_id, mode=conversation.mode, web_search=web_search,
+                           model=chosen[kept].ref if kept is not None else model.ref,
                            history=conversation.history, results=conversation.results,
                            transcript=[*transcript, {**turn, 'events': chats.compact(shown)}])
 
             async with conversation.lock:
-                event = {'type': 'model', 'model': public(model)}
-                shown.append(event)
-                yield f'data: {json.dumps(event)}\n\n'
+                conversation.branches = None  # an earlier compare turn's choice is final now
+                options = dict(web_search=web_search, jobs=jobs, exporter=exporter, plugin_manager=plugin_manager,
+                               creator=creator, documents=lambda *a: documents(*a, conversation_id))
+                if len(chosen) > 1:
+                    turn_events = run_compare(providers, db, conversation, text, chosen, describe_error=_api_error,
+                                              **options)
+                else:
+                    event = {'type': 'model', 'model': public(model)}
+                    shown.append(event)
+                    yield f'data: {json.dumps(event)}\n\n'
+                    turn_events = run_single(providers, db, conversation, text, model, describe_error=_api_error,
+                                             **options)
                 try:
-                    async for event in run_turn(providers, db, conversation, text, model,
-                                                web_search=web_search, jobs=jobs,
-                                                exporter=exporter, plugin_manager=plugin_manager,
-                                                creator=creator,
-                                                documents=lambda *a: documents(*a, conversation_id)):
+                    async for event in turn_events:
                         shown.append(event)
                         yield f'data: {json.dumps(event)}\n\n'
                 except Exception as exc:
@@ -186,6 +203,42 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
 
         return StreamingResponse(events(), media_type='text/event-stream',
                                  headers={'Cache-Control': 'no-cache'})
+
+    async def chart(request: Request):
+        """Re-run a saved chat's chart from its SQL and spec (saved chats keep no chart data)."""
+        body = await request.json()
+        data = await asyncio.to_thread(rerun_chart, db, str(body.get('sql') or ''), body.get('plot_spec'))
+        return JSONResponse(data, status_code=400 if 'error' in data else 200)
+
+    async def chat_stop(request: Request):
+        """Stop a chat's reply: every model's, or one compared model's (``branch``)."""
+        body = await request.json()
+        conversation = conversations.get(str(body.get('conversation', '')))
+        branch = body.get('branch')
+        if conversation is None or not (branch is None or isinstance(branch, int)):
+            return JSONResponse({'error': 'no such chat'}, status_code=404)
+        return JSONResponse({'stopped': stop_turn(conversation, branch)})
+
+    async def chat_keep(request: Request):
+        """Continue a chat from another model's answer to its latest compare turn."""
+        body = await request.json()
+        conversation_id = str(body.get('conversation', ''))
+        conversation = conversations.get(conversation_id)
+        if conversation is None or conversation.lock.locked() or not isinstance(body.get('branch'), int):
+            return JSONResponse({'error': 'that chat is busy or no longer open'}, status_code=409)
+        branch = body['branch']
+        if not keep_branch(conversation, branch):
+            return JSONResponse({'error': 'You can only switch answers on the latest turn, before the app restarts.'},
+                                status_code=409)
+        saved = await asyncio.to_thread(chats.get, db, conversation_id)
+        if saved:
+            transcript = saved['transcript']
+            transcript[-1]['events'] = [{**e, 'branch': branch} if e.get('type') == 'kept' else e
+                                        for e in transcript[-1]['events']]
+            await asyncio.to_thread(chats.save, db, conversation_id, mode=conversation.mode,
+                                    web_search=saved['web_search'], model=conversation.branches[branch]['model'],
+                                    history=conversation.history, results=conversation.results, transcript=transcript)
+        return JSONResponse({'ok': True, 'branch': branch})
 
     async def chat_decision(request: Request):
         """The user's answer to a request_download popup."""
@@ -462,6 +515,26 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return Response(value, media_type='text/html')
         return JSONResponse(json.loads(json.dumps(value, default=_json_default)))
 
+    async def explorer_sql(request: Request):
+        """The explorer's SQL editor: one read-only SELECT, first rows only."""
+        body = await request.json()
+        try:
+            return JSONResponse(await asyncio.to_thread(explorer.run_sql, db, str(body.get('sql') or '')))
+        except (ValueError, duckdb.Error) as exc:
+            return JSONResponse({'error': str(exc)}, status_code=400)
+
+    async def explorer_check(request: Request):
+        """Live checking for the SQL editor: DuckDB parses and binds the query without running it."""
+        body = await request.json()
+        return JSONResponse({'problems': await asyncio.to_thread(explorer.check_sql, db, str(body.get('sql') or ''))})
+
+    async def explorer_functions(request: Request):
+        return JSONResponse({'functions': await asyncio.to_thread(explorer.functions, db)},
+                            headers={'Cache-Control': 'max-age=3600'})
+
+    async def explorer_schema(request: Request):
+        return JSONResponse(await asyncio.to_thread(explorer.schema, db))
+
     async def explorer_overview(request: Request):
         return JSONResponse(await asyncio.to_thread(explorer.overview, db))
 
@@ -560,6 +633,9 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/models', models),
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
+        Route('/api/chat/keep', chat_keep, methods=['POST']),
+        Route('/api/chat/stop', chat_stop, methods=['POST']),
+        Route('/api/chart', chart, methods=['POST']),
         Route('/api/query', query, methods=['POST']),
         Route('/api/about', about),
         Route('/api/plugins', plugin_list),
@@ -587,6 +663,10 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/api/explorer/tables/{name}/values', explorer_values),
         Route('/api/explorer/tables/{name}/summaries', explorer_summaries),
         Route('/api/explorer/freshness', freshness),
+        Route('/api/explorer/sql', explorer_sql, methods=['POST']),
+        Route('/api/explorer/schema', explorer_schema),
+        Route('/api/explorer/check', explorer_check, methods=['POST']),
+        Route('/api/explorer/functions', explorer_functions),
         Route('/api/downloads', download_jobs, methods=['GET', 'POST']),
         Route('/api/downloads/plan/{name}', download_plan),
         Route('/api/downloads/{id:int}', download_job, methods=['POST', 'DELETE']),

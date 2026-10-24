@@ -26,7 +26,7 @@ import vl_convert
 
 from . import catalog, downloads, explorer, live
 from .ingest import SUPPORTED, _month_shift
-from .models import ModelInfo
+from .models import ModelInfo, public as model_public
 
 TABLE_ROWS = 200
 MAX_ROUNDS = 25
@@ -386,16 +386,47 @@ def visualize_tool(db, sql: str, plot_spec: str) -> tuple[str, str | None, list[
     if not result.rows:
         return 'The query returned no rows. Adjust the SQL before plotting.', None, [table_event(result)]
     try:
-        full = altair.Chart.from_dict({**spec, 'data': {'values': _records(result)}}, validate=True).to_dict()
+        full = chart_spec(spec, _records(result))
         png = vl_convert.vegalite_to_png(full, scale=1)
     except Exception as err:
         return f'Plot rendering failed: {err}. Revise the specification and retry.', None, []
     text = f'Plot created from all {len(result.rows)} rows. First 10 rows:\n{_preview(result)}'
+    return text, base64.standard_b64encode(png).decode(), [plot_event(sql, spec, full, result)]
+
+
+def chart_spec(plot_spec: dict, records: list[dict]) -> dict:
+    """A complete Vega-Lite spec: ``plot_spec`` with ``records`` as its data.
+
+    Validated with one row, then given them all: altair's schema check walks every data row
+    and grows much faster than linearly (26k rows took ~2 minutes), while the structure is
+    checked in prepare_spec and Vega-Lite accepts any objects as rows.
+    """
+    full = altair.Chart.from_dict({**plot_spec, 'data': {'values': records[:1]}}, validate=True).to_dict()
+    (name,) = full['datasets']  # the data, under altair's hashed dataset name
+    full['datasets'][name] = records
+    return full
+
+
+def plot_event(sql: str, plot_spec: dict, full: dict, result: Result) -> dict:
     # The data travels with the plot (shown under its SQL), not as a separate table at the end of the turn.
     table = table_event(result)
-    events = [{'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': spec,
-               'columns': table['columns'], 'rows': table['rows'], 'total': table['total']}]
-    return text, base64.standard_b64encode(png).decode(), events
+    return {'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': plot_spec,
+            'columns': table['columns'], 'rows': table['rows'], 'total': table['total']}
+
+
+def rerun_chart(db, sql: str, plot_spec) -> dict:
+    """Redraw a saved chat's chart from its SQL (saved chats keep no chart data)."""
+    try:
+        spec = prepare_spec(json.dumps(plot_spec))
+    except Exception as err:
+        return {'error': f"Invalid plot specification: {getattr(err, 'message', str(err))}"}
+    result = run_query(db, sql)
+    if isinstance(result, str):
+        return {'error': result}
+    try:
+        return plot_event(sql, spec, chart_spec(spec, _records(result)), result)
+    except Exception as err:
+        return {'error': f'Plot failed: {err}'}
 
 
 def earlier_reply_label(entry: dict, model: ModelInfo) -> str:
@@ -494,6 +525,11 @@ class Conversation:
     pending: dict = field(default_factory=dict)  # download request id -> Future for the user's decision
     results: dict = field(default_factory=dict)  # 'R1' -> {'sql', 'plot_spec'} for reports
     mode: str = 'analyst'  # or 'creator' (plugin building); fixed for the conversation
+    # After a compare turn: each model's {'model', 'history', 'results', 'base'}, until the next turn starts.
+    branches: list | None = None
+    # While a turn runs: branch (None for a single-model turn) -> (task, the Conversation it runs on), for stop_turn.
+    running: dict = field(default_factory=dict)
+    stopping: bool = False  # set by stop_turn just before it cancels this conversation's reply
 
 
 DECISION_TIMEOUT = 1800  # seconds to wait for the user to approve or decline a download
@@ -623,16 +659,20 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     provider = providers[model.provider]
     history = conversation.history
     start = len(history)
+    partial = []
     history.append({'role': 'user', 'text': text, 'context': await asyncio.to_thread(data_status, db)})
     latest_table = None
     system, tools = mode_setup(conversation.mode, model, web_search, plugin_manager)
     try:
         for _ in range(MAX_ROUNDS):
             turn = None
+            partial = []  # this round's text so far, kept if the user stops the reply
             async for item in provider.respond(model, history, web_search=web_search, system=system, tools=tools):
                 if item.get('role') == 'assistant':
                     turn = item
                 else:
+                    if item.get('type') == 'text':
+                        partial.append(item.get('delta', ''))
                     yield item
             if turn is None:  # refused; the provider already reported it
                 return
@@ -719,9 +759,135 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
             history.append({'role': 'tool', 'results': results})
         else:
             yield {'type': 'error', 'message': f'Stopped after {MAX_ROUNDS} tool rounds.'}
+    except asyncio.CancelledError:
+        if conversation.stopping:  # the user pressed Stop: keep what was said, then a note
+            _keep_stopped(history, start, ''.join(partial), model)
+        else:  # the browser went away: forget the turn
+            del history[start:]
+        raise
     except BaseException:
         # Leave history ending on a complete turn (no tool call without its result).
         del history[start:]
         raise
     if latest_table is not None:
         yield latest_table
+
+
+MAX_COMPARE = 4
+STOPPED = '[Stopped by the user]'
+
+
+def _keep_stopped(history: list, start: int, partial: str, model: ModelInfo) -> None:
+    """End a stopped turn's history validly: drop a tool call whose results never came, then
+    record what the model had written so far and that the user stopped it."""
+    if len(history) <= start:
+        return  # stopped before the user message was even recorded
+    if history[-1]['role'] == 'assistant' and history[-1]['tool_calls']:
+        partial = partial or history[-1]['text']
+        history.pop()
+    text = f'{partial.rstrip()}\n\n{STOPPED}' if partial.strip() else f'{STOPPED} (before it replied)'
+    history.append({'role': 'assistant', 'model': model.ref, 'model_name': model.name, 'text': text,
+                    'tool_calls': [], 'raw': {}, 'stop': 'end'})
+
+
+def stop_turn(conversation: Conversation, branch: int | None = None) -> bool:
+    """Stop the running reply: every model's, or (``branch``) one compared model's."""
+    targets = list(conversation.running.items()) if branch is None else \
+        [(branch, conversation.running[branch])] if branch in conversation.running else []
+    for _, (task, runs_on) in targets:
+        runs_on.stopping = True
+        task.cancel()
+    return bool(targets)
+
+
+async def run_single(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
+                     describe_error=str, **options) -> AsyncIterator[dict]:
+    """run_turn in a task that stop_turn can cancel; ends with a 'stopped' event if it was stopped."""
+    queue = asyncio.Queue()
+    conversation.stopping = False
+
+    async def drive():
+        try:
+            async for event in run_turn(providers, db, conversation, text, model, **options):
+                await queue.put(event)
+        except asyncio.CancelledError:
+            if conversation.stopping:
+                await queue.put({'type': 'stopped'})
+        except Exception as exc:
+            await queue.put({'type': 'error', 'message': describe_error(exc)})
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(drive())
+    conversation.running[None] = (task, conversation)
+    try:
+        while (event := await queue.get()) is not None:
+            yield event
+    finally:  # also when the browser goes away mid-reply (that's not a Stop: the turn is forgotten)
+        conversation.running.pop(None, None)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def run_compare(providers: dict, db, conversation: Conversation, text: str, models: list[ModelInfo],
+                      describe_error=str, **options) -> AsyncIterator[dict]:
+    """One user turn answered by several models at once, each on its own copy of the conversation.
+
+    Events carry the index of their model as ``branch``; ``branch_done`` marks a model finishing,
+    and stop_turn can stop one model (``stopped``) or all. The conversation then continues from
+    the first model that replied without being stopped (a ``kept`` event says which);
+    ``keep_branch`` switches to another until the next turn starts. Branches share ``pending``,
+    so approval cards work.
+    """
+    branches = [Conversation(history=list(conversation.history), results=dict(conversation.results),
+                             pending=conversation.pending, mode=conversation.mode) for _ in models]
+    queue = asyncio.Queue()
+
+    async def drive(index):
+        try:
+            async for event in run_turn(providers, db, branches[index], text, models[index], **options):
+                await queue.put({**event, 'branch': index})
+        except asyncio.CancelledError:
+            if branches[index].stopping:
+                await queue.put({'type': 'stopped', 'branch': index})
+        except Exception as exc:
+            await queue.put({'type': 'error', 'message': describe_error(exc), 'branch': index})
+        finally:
+            conversation.running.pop(index, None)
+            await queue.put({'type': 'branch_done', 'branch': index})
+            await queue.put(None)
+
+    yield {'type': 'compare', 'models': [model_public(m) for m in models]}
+    tasks = [asyncio.create_task(drive(i)) for i in range(len(models))]
+    conversation.running.update({i: (task, branches[i]) for i, task in enumerate(tasks)})
+    try:
+        for _ in tasks:
+            while (event := await queue.get()) is not None:
+                yield event
+    finally:  # also when the browser goes away mid-reply
+        conversation.running.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    base = len(conversation.history)
+    conversation.branches = [{'model': m.ref, 'history': b.history, 'results': b.results, 'base': base}
+                             for m, b in zip(models, branches)]
+    replied = [i for i, b in enumerate(branches) if len(b.history) > base]
+    kept = next((i for i in replied if not branches[i].stopping), replied[0] if replied else None)
+    if kept is not None:
+        keep_branch(conversation, kept)
+    yield {'type': 'kept', 'branch': kept}
+
+
+def keep_branch(conversation: Conversation, index: int) -> bool:
+    """Continue the conversation from compare branch ``index``; False if that isn't possible."""
+    branches = conversation.branches or []
+    if not 0 <= index < len(branches):
+        return False
+    branch = branches[index]
+    if not any(h['role'] == 'assistant' for h in branch['history'][branch['base']:]):
+        return False  # that model failed before replying
+    conversation.history = list(branch['history'])
+    conversation.results = dict(branch['results'])
+    return True
+

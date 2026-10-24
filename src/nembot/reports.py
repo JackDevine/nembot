@@ -14,12 +14,11 @@ import json
 from pathlib import Path
 import re
 
-import altair
 import markdown as markdown_lib
 import vl_convert
 
 from .attribution import CREDIT
-from .chat import Result, _jsonable, _records, run_query
+from .chat import Result, _jsonable, _records, chart_spec, run_query
 
 FORMATS = {'html': '.html', 'pdf': '.pdf', 'docx': '.docx', 'pptx': '.pptx', 'xlsx': '.xlsx',
            'jupyter': '.ipynb', 'marimo': '.py'}
@@ -74,8 +73,7 @@ def prepare(db, refs: list[str], results: dict, *, images: bool) -> dict[str, It
             item.result = result
             if item.plot_spec:
                 try:
-                    item.spec = altair.Chart.from_dict({**item.plot_spec, 'data': {'values': _records(result)}},
-                                                       validate=True).to_dict()
+                    item.spec = chart_spec(item.plot_spec, _records(result))
                     if images:
                         item.png = vl_convert.vegalite_to_png(item.spec, scale=2)
                 except Exception as exc:

@@ -1,12 +1,17 @@
 """Read-only explorer API over the catalogue and the local DuckDB database."""
 from datetime import date, datetime, time
 from decimal import Decimal
+import json
+import re
+from time import perf_counter
 
 import duckdb
 
 from . import catalog
 
 PAGE_SIZES = (10, 25, 50, 100)
+CHART_ROWS = 5000  # the data table's "Chart this" asks for this many rows at once
+SQL_ROWS = 1000  # rows the SQL editor shows; it streams them, so big tables stay cheap
 FILTER_COLUMNS = ('REGIONID', 'DUID')  # offered as dropdown/text filters when a table has them
 
 
@@ -323,7 +328,7 @@ def rows(db: duckdb.DuckDBPyConnection, name: str, *, offset: int = 0, limit: in
     entry = catalog.tables().get(name)
     if entry is None:
         return None
-    limit = limit if limit in PAGE_SIZES else 25
+    limit = limit if limit in PAGE_SIZES or limit == CHART_ROWS else 25
     offset = max(0, offset)
     where, params = _filters(entry, start, end, values or {})
     extra, extra_params = conditions(entry, filters or [], search)
@@ -355,3 +360,127 @@ def parse_date(value: str | None) -> str | None:
     if not value:
         return None
     return date.fromisoformat(value).isoformat()  # raises ValueError for bad input
+
+
+def run_sql(db: duckdb.DuckDBPyConnection, sql: str, limit: int = SQL_ROWS) -> dict:
+    """The SQL editor: run one read-only SELECT and return its first ``limit`` rows."""
+    cursor = db.cursor()
+    try:
+        statements = cursor.extract_statements(sql)
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise ValueError('Only one SELECT query is allowed.')
+        started = perf_counter()
+        cursor.execute(sql)
+        columns = [d[0] for d in cursor.description]
+        rows = cursor.fetchmany(limit + 1)
+        seconds = perf_counter() - started
+    finally:
+        cursor.close()
+    return {'columns': columns, 'rows': [[_jsonable(v) for v in row] for row in rows[:limit]],
+            'truncated': len(rows) > limit, 'seconds': round(seconds, 3)}
+
+
+def schema(db: duckdb.DuckDBPyConnection) -> dict[str, list[str]]:
+    """Downloaded tables and their columns (from the catalogue), for SQL autocompletion."""
+    cursor = db.cursor()
+    try:
+        downloaded = _downloaded(cursor)
+    finally:
+        cursor.close()
+    tables = catalog.tables()
+    return {name: [c['name'] for c in tables[name]['columns']] for name in sorted(downloaded) if name in tables}
+
+
+def check_sql(db: duckdb.DuckDBPyConnection, sql: str) -> list[dict]:
+    """Problems with an editor query, found by DuckDB's own parser and binder without running it.
+
+    Each is ``{'message', 'from', 'to'}`` (character offsets). Binding a SELECT relation doesn't
+    execute it, so this stays fast on any table. Binder errors carry no position, but they quote
+    the name at fault (column "X", Table with name X), which is underlined where it first appears.
+    """
+    if not sql.strip():
+        return []
+    cursor = db.cursor()
+    try:
+        try:
+            statements = cursor.extract_statements(sql)
+        except duckdb.Error as exc:
+            serialized = json.loads(cursor.execute('SELECT json_serialize_sql(?)', [sql]).fetchone()[0])
+            position = serialized.get('position')
+            start = min(int(position), len(sql)) if position is not None else 0
+            if not sql[start:].strip():  # "at end of input": the last word typed
+                start = len(sql.rstrip())
+                start -= len(re.search(r'\w*$', sql[:start]).group()) or 1
+            word = re.match(r'\w+', sql[start:])
+            return [_problem(str(exc), sql, start, start + (len(word.group()) if word else 1))]
+        if len(statements) > 1:
+            start = sql.find(statements[1].query.strip()[:20]) if statements[1].query.strip() else -1
+            return [_problem('Only one query at a time: remove everything after the first statement.', sql,
+                             max(start, 0), len(sql))]
+        if not statements or statements[0].type != duckdb.StatementType.SELECT:
+            return [_problem('Only SELECT queries can run here (the editor is read-only).', sql, 0, len(sql))]
+        try:
+            cursor.sql(sql)
+        except duckdb.Error as exc:
+            start, end = _culprit(str(exc), sql)
+            return [_problem(str(exc), sql, start, end)]
+        return []
+    finally:
+        cursor.close()
+
+
+def _problem(message: str, sql: str, start: int, end: int) -> dict:
+    start = min(max(start, 0), len(sql))
+    end = min(max(end, start), len(sql))
+    if start == end and start == len(sql) and start > 0:  # "syntax error at end of input"
+        start -= 1
+    return {'message': message.strip(), 'from': start, 'to': max(end, start + 1) if sql else 0}
+
+
+def _culprit(message: str, sql: str) -> tuple[int, int]:
+    """Where the name a binder/catalog error quotes first appears in the query (else everything)."""
+    first = message.split('\n', 1)[0]
+    names = re.findall(r'"([^"]+)"', first) + re.findall(r'with name (\S+?)(?: does not exist|!|$)', first)
+    for name in names:
+        for candidate in (name, name.split('.')[-1]):
+            match = re.search(r'(?<![\w"])' + re.escape(candidate) + r'(?![\w"])', sql, re.IGNORECASE) \
+                or re.search(re.escape(candidate), sql, re.IGNORECASE)
+            if match:
+                return match.start(), match.end()
+    return 0, len(sql)
+
+
+_functions_cache: list[dict] | None = None
+
+
+def functions(db: duckdb.DuckDBPyConnection) -> list[dict]:
+    """DuckDB's functions for editor completion and hover help: one entry per name with its
+    description, signatures (up to six overloads) and examples, from ``duckdb_functions()``."""
+    global _functions_cache
+    if _functions_cache is None:
+        cursor = db.cursor()
+        try:
+            rows = cursor.execute("""
+                SELECT function_name, function_type, description, return_type, parameters, parameter_types,
+                       varargs, examples
+                FROM duckdb_functions()
+                WHERE function_type <> 'pragma' AND regexp_full_match(function_name, '[a-z][a-z0-9_]*')
+                ORDER BY function_name, len(parameters), function_oid""").fetchall()
+        finally:
+            cursor.close()
+        entries: dict[str, dict] = {}
+        for name, kind, description, returns, params, types, varargs, examples in rows:
+            entry = entries.setdefault(name, {'name': name, 'type': kind, 'description': None, 'signatures': [],
+                                              'examples': []})
+            entry['description'] = entry['description'] or description
+            args = [f'{p} {t}' if t else p for p, t in zip(params or [], (types or []) + [None] * len(params or []))]
+            if varargs:
+                args.append(f'{varargs}...')
+            signature = f"{name}({', '.join(args)})" + (f' → {returns}' if returns else '')
+            if signature not in entry['signatures'] and len(entry['signatures']) < 6:
+                entry['signatures'].append(signature)
+            for example in examples or []:
+                if example not in entry['examples'] and len(entry['examples']) < 2:
+                    entry['examples'].append(example)
+        _functions_cache = list(entries.values())
+    return _functions_cache

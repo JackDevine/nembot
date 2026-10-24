@@ -186,7 +186,10 @@ function reportLinks(report) {
   return links;
 }
 
+// Saved chats keep a chart's SQL and spec but not its data (no ``spec``): it's re-run when
+// it scrolls into view, with a note, and a warning if the row count has changed since.
 function renderPlot(event, actions) {
+  if (!event.spec && event.plot_spec) return rerunPlot(event, actions);
   const wrap = el('div');
   const spec = el('div');
   spec.append(el('p', '', 'Data is supplied by the plot SQL above.'), jsonTree(event.plot_spec));
@@ -200,6 +203,39 @@ function renderPlot(event, actions) {
   const target = el('div');
   wrap.append(target);
   embedChart(target, event.spec);
+  return wrap;
+}
+
+const rerunObserver = new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (entry.isIntersecting) { rerunObserver.unobserve(entry.target); entry.target.rerun(); }
+  }
+}, { rootMargin: '400px' });
+
+function rerunPlot(event, actions) {
+  const wrap = el('div', 'rerun-plot');
+  wrap.append(el('div', 'status', 'Chart: re-running its SQL…'));
+  wrap.rerun = async () => {
+    let data;
+    try {
+      const response = await fetch('/api/chart', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: event.sql, plot_spec: event.plot_spec }) });
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    } catch (err) {
+      const box = el('div', 'job-panel failed');
+      box.append(el('b', '', 'This chart no longer runs'), el('pre', 'job-error', err.message),
+        el('p', '', 'A table it uses may not be downloaded any more.'));
+      wrap.replaceChildren(box, sqlBlock('Plot SQL', event.sql));
+      return;
+    }
+    const changed = event.total !== undefined && event.total !== data.total;
+    const note = el('div', changed ? 'rerun-note changed' : 'rerun-note',
+      changed ? `⚠️ The data has changed since this reply: it had ${event.total.toLocaleString()} rows, now ${data.total.toLocaleString()}.`
+        : 'Re-ran when this chat was opened.');
+    wrap.replaceChildren(renderPlot({ ...event, ...data, result_id: event.result_id }, actions), note);
+  };
+  rerunObserver.observe(wrap);
   return wrap;
 }
 

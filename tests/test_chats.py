@@ -26,6 +26,16 @@ class Chats(unittest.TestCase):
                     transcript=list(transcript))
         chats.save(self.db, chat_id, **{**args, **overrides})
 
+    def test_charts_are_saved_without_their_data(self):
+        plot = {'type': 'plot', 'sql': 'SELECT 1 AS x', 'plot_spec': {'mark': 'bar'}, 'spec': {'datasets': {'d': [{'x': 1}]}},
+                'columns': ['x'], 'rows': [[1]], 'total': 1, 'result_id': 'R1'}
+        table = {'type': 'table', 'sql': 'SELECT 1 AS x', 'columns': ['x'], 'rows': [[1]], 'total': 1}
+        self.save('c1', transcript=[{'text': 'plot it', 'events': [plot, table]}])
+        saved = chats.get(self.db, 'c1')['transcript'][0]['events']
+        self.assertEqual(saved[0], {'type': 'plot', 'sql': 'SELECT 1 AS x', 'plot_spec': {'mark': 'bar'}, 'columns': ['x'],
+                                    'total': 1, 'result_id': 'R1'})
+        self.assertEqual(saved[1], table)  # tables keep their (at most 200) preview rows
+
     def test_save_is_an_upsert_and_round_trips(self):
         self.save(transcript=[{'text': 'prices?', 'events': [{'type': 'text', 'delta': 'Up.'}]}])
         self.save(web_search=False, transcript=[{'text': 'a', 'events': []}, {'text': 'b', 'events': []}])
@@ -51,6 +61,11 @@ class Chats(unittest.TestCase):
         self.assertEqual([c['id'] for c in chats.list_all(self.db)], ['new', 'old'])
         chats.delete(self.db, 'new')
         self.assertEqual([c['id'] for c in chats.list_all(self.db)], ['old'])
+
+    def test_compact_keeps_compared_models_text_apart(self):
+        events = [{'type': 'text', 'delta': 'A1', 'branch': 0}, {'type': 'text', 'delta': 'B1', 'branch': 1},
+                  {'type': 'text', 'delta': 'B2', 'branch': 1}, {'type': 'text', 'delta': 'A2', 'branch': 0}]
+        self.assertEqual([(e['branch'], e['delta']) for e in chats.compact(events)], [(0, 'A1'), (1, 'B1B2'), (0, 'A2')])
 
     def test_compact_joins_streamed_text_and_drops_progress(self):
         events = [{'type': 'model', 'model': {}}, {'type': 'tool_running', 'name': 'query_mms'},

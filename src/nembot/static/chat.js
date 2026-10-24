@@ -4,6 +4,7 @@ const log = document.getElementById('log');
 const form = document.getElementById('form');
 const input = document.getElementById('input');
 const send = document.getElementById('send');
+const stopButton = document.getElementById('stop');
 const chatStats = document.getElementById('chat-stats');
 let conversation = null;    // the chat on screen
 let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
@@ -22,6 +23,7 @@ function drawModeSwitch() {
   input.placeholder = chatMode === 'creator'
     ? 'Describe a feature to add, e.g. "a tab showing negative-price hours by region"…'
     : 'Ask about NEM prices, demand or generation…';
+  drawCompareChips();
 }
 
 function createPane(id, mode, webSearchOn) {
@@ -48,7 +50,7 @@ function showPane(id) {
     other.el.hidden = other !== pane;
     if (other !== pane && !other.busy) { other.el.remove(); panes.delete(other.id); }
   }
-  send.disabled = pane.busy;
+  drawSend(pane);
   drawChatStats();
   drawModeSwitch();
   window.drawChatList?.();
@@ -84,6 +86,10 @@ const modelSearch = document.getElementById('model-search');
 const modelList = document.getElementById('model-list');
 let models = [];
 let currentModel = null;
+// Extra models that answer alongside currentModel, shown side by side (a compare turn).
+let compareModels = [];
+const MAX_COMPARE = 4;
+const compareChips = document.getElementById('compare-chips');
 
 function modelBadges(m) {
   const meta = el('span', 'meta');
@@ -98,6 +104,34 @@ function setModel(m) {
   localStorage.setItem('model', m.ref);
   modelButton.textContent = `${m.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${m.name}`;
   modelButton.title = `${m.ref} — ${m.vision ? 'text + image input' : 'text-only input: cannot see plots'}`;
+  setCompareModels(compareModels.filter(c => c.ref !== m.ref));
+}
+
+function setCompareModels(list) {
+  compareModels = list;
+  localStorage.setItem('compareModels', JSON.stringify(list.map(m => m.ref)));
+  drawCompareChips();
+}
+
+// "vs <model> ×" chips beside the model button. Creator mode always uses one model.
+function drawCompareChips() {
+  compareChips.replaceChildren();
+  compareChips.hidden = chatMode === 'creator' || !compareModels.length;
+  for (const m of compareModels) {
+    const chip = el('span', 'compare-chip', `vs ${m.name}`);
+    chip.title = `${m.ref} also answers each message; the replies appear side by side`;
+    const remove = el('button', '', '×');
+    remove.type = 'button';
+    remove.title = 'Stop comparing with this model';
+    remove.onclick = () => setCompareModels(compareModels.filter(c => c !== m));
+    chip.append(remove);
+    compareChips.append(chip);
+  }
+}
+
+// The models that answer the next message: the chat's model first.
+function turnModels(pane) {
+  return [currentModel, ...(pane.mode === 'creator' ? [] : compareModels)].filter(Boolean).map(m => m.ref);
 }
 
 function drawModels() {
@@ -110,11 +144,28 @@ function drawModels() {
     modelList.append(el('h3', '', `${title} · ${group.length}`));
     for (const m of group) {
       const usable = m.tools && m.available;
-      const row = el('div', 'model' + (usable ? '' : ' disabled') + (currentModel && m.ref === currentModel.ref ? ' current' : ''));
+      const compared = compareModels.some(c => c.ref === m.ref);
+      const row = el('div', 'model' + (usable ? '' : ' disabled') + (currentModel && m.ref === currentModel.ref ? ' current' : '')
+        + (compared ? ' compared' : ''));
       row.title = !m.available ? 'Provider credentials are not configured (OPENROUTER_API_KEY).'
         : !m.tools ? 'This model does not support tool calling, so it cannot query the database.' : m.id;
       row.append(el('span', '', m.name), modelBadges(m));
-      if (usable) row.onclick = () => { setModel(m); picker.classList.remove('open'); input.focus(); };
+      if (usable) {
+        row.onclick = () => { setModel(m); picker.classList.remove('open'); input.focus(); };
+        if (chatMode !== 'creator' && m.ref !== currentModel?.ref) {
+          const add = el('button', 'compare-add', compared ? '✓ comparing' : '+ compare');
+          add.type = 'button';
+          add.title = compared ? 'Stop comparing with this model' : 'Also ask this model, and show the answers side by side';
+          add.onclick = e => {
+            e.stopPropagation();
+            if (compared) setCompareModels(compareModels.filter(c => c.ref !== m.ref));
+            else if (compareModels.length >= MAX_COMPARE - 1) return alert(`Compare at most ${MAX_COMPARE} models at once.`);
+            else setCompareModels([...compareModels, m]);
+            drawModels();
+          };
+          row.append(add);
+        }
+      }
       modelList.append(row);
     }
   }
@@ -127,7 +178,10 @@ async function loadModels() {
   body.errors.forEach(message => console.warn(message));
   const saved = models.find(m => m.ref === localStorage.getItem('model') && m.tools && m.available);
   const fallback = models.find(m => m.ref === body.default) || { ref: body.default, provider: 'claude', name: 'Claude Opus 5.5', vision: true };
+  const compared = JSON.parse(localStorage.getItem('compareModels') || '[]');  // read before setModel saves the list
   setModel(saved || fallback);
+  setCompareModels(compared.map(ref => models.find(m => m.ref === ref && m.tools && m.available && m.ref !== currentModel.ref))
+    .filter(Boolean).slice(0, MAX_COMPARE - 1));
 }
 
 modelButton.onclick = () => {
@@ -148,7 +202,7 @@ showPane(createPane(crypto.randomUUID(), chatMode, webSearch.checked).id);
 function resultActions(event, text) {
   const box = el('span', 'result-actions');
   const payload = { sql: event.sql, plot_spec: event.plot_spec || null, question: text };
-  box.append(snippetButton(payload), docButton(payload), ...pluginResultActions(event));
+  box.append(snippetButton(payload), docButton(payload), ...pluginResultActions(event, text));
   return box;
 }
 input.addEventListener('keydown', e => {
@@ -336,11 +390,75 @@ function drawChatStats() {
 
 // One chat turn in ``pane``: the user's text, then the reply as its UI events arrive. With
 // ``replay`` (redrawing a saved chat) nothing opens, downloads or waits for an answer.
+// A compare turn ('compare' event) shows each model's reply in its own column; their events
+// carry a ``branch`` index, and 'kept' says which reply the chat continues from.
 function renderTurn(text, pane, { replay = false } = {}) {
+  pane.el.querySelectorAll('.keep-branch').forEach(b => b.remove());  // earlier choices are final now
   const turn = el('div', 'turn');
   const reply = el('div', 'assistant');
   turn.append(el('div', 'user', text), reply);
   pane.el.append(turn);
+  const main = replyRenderer(reply, pane, text, replay);
+  let columns = null;
+
+  function handle(event) {
+    if (event.type === 'compare') { main.status.hidden = true; columns = compareColumns(turn, reply, pane, text, replay, event.models); }
+    else if (event.type === 'kept') columns?.keep(event.branch);
+    else if (columns && Number.isInteger(event.branch)) columns.renderers[event.branch].handle(event);
+    else main.handle(event);
+  }
+  function finish() { main.finish(); columns?.renderers.forEach(r => r.finish()); }
+  return { handle, finish };
+}
+
+function compareColumns(turn, reply, pane, text, replay, models) {
+  const grid = el('div', 'compare-grid');
+  grid.style.setProperty('--columns', models.length);
+  turn.classList.add('compare-turn');
+  turn.insertBefore(grid, reply);
+  const cols = models.map((m, index) => {
+    const col = el('div', 'compare-col');
+    const head = el('div', 'compare-head');
+    const keep = el('button', 'small keep-branch', 'Continue from this answer');
+    keep.hidden = true;
+    const stop = el('button', 'small stop-branch', 'Stop');
+    stop.title = `Stop ${m.name}'s reply (the other models carry on)`;
+    stop.hidden = replay;
+    stop.onclick = async () => {
+      stop.disabled = true;
+      try { await sendJSON('/api/chat/stop', 'POST', { conversation: pane.id, branch: index }); }
+      catch (err) { stop.disabled = false; alert(err.message); }
+    };
+    keep.title = 'Your next message follows on from this reply (and its query results)';
+    keep.onclick = async () => {
+      keep.disabled = true;
+      try {
+        await sendJSON('/api/chat/keep', 'POST', { conversation: pane.id, branch: index });
+        mark(index);
+      } catch (err) { alert(err.message); }
+      keep.disabled = false;
+    };
+    head.append(el('b', '', `${m.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${m.name}`), el('span', 'kept-label', '✓ continuing from this'), stop, keep);
+    const body = el('div', 'assistant');
+    col.append(head, body);
+    grid.append(col);
+    const renderer = replyRenderer(body, pane, text, replay);
+    const handle = renderer.handle;
+    renderer.handle = event => {  // the model finished or was stopped: no more Stop for it
+      if (event.type === 'branch_done' || event.type === 'stopped') stop.hidden = true;
+      handle(event);
+    };
+    return { col, keep, renderer };
+  });
+  const mark = kept => cols.forEach((c, i) => {
+    c.col.classList.toggle('kept', i === kept);
+    c.keep.hidden = i === kept || kept === null || kept === undefined;
+  });
+  return { renderers: cols.map(c => c.renderer), keep: mark };
+}
+
+// Draws one model's reply into ``reply`` as its events arrive.
+function replyRenderer(reply, pane, text, replay) {
   const shown = () => conversation === pane.id;
   const waiting = value => { if (!replay && pane.waiting !== value) { pane.waiting = value; window.drawChatList?.(); } };
   const status = el('div', 'status');
@@ -349,7 +467,7 @@ function renderTurn(text, pane, { replay = false } = {}) {
   reply.append(status);
   let segment = null, markdown = '';
   const scroll = () => { if (shown()) log.scrollTop = log.scrollHeight; };
-  const place = node => { reply.insertBefore(node, status); scroll(); };
+  const place = node => { status.parentNode === reply ? reply.insertBefore(node, status) : reply.append(node); scroll(); };
 
   function handle(event) {
     switch (event.type) {
@@ -476,6 +594,14 @@ function renderTurn(text, pane, { replay = false } = {}) {
         break;
       }
       case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
+      case 'stopped':  // the user pressed Stop: what was written stays, approval cards can't be answered
+        segment = null;
+        status.remove();
+        reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button').forEach(b => { b.disabled = true; });
+        place(el('div', 'stopped-note', '■ Stopped'));
+        waiting(false);
+        break;
+      case 'branch_done': status.remove(); break;  // one compared model finished; the others may still run
       case 'chat_title': renameChatInList(event.id, event.title); break;
       case 'usage': addUsage(pane.stats, event); if (shown()) drawChatStats(); break;
     }
@@ -486,7 +612,7 @@ function renderTurn(text, pane, { replay = false } = {}) {
     // Approval cards from a saved chat can't be answered any more.
     if (replay) reply.querySelectorAll('.download-card .buttons button').forEach(b => { b.disabled = true; });
   }
-  return { handle, finish };
+  return { handle, finish, status };
 }
 
 async function ask(text) {
@@ -494,7 +620,7 @@ async function ask(text) {
   pane.busy = true;
   pane.webSearch = webSearch.checked;
   pane.firstText ||= text;
-  send.disabled = true;
+  drawSend(pane);
   const { handle, finish } = renderTurn(text, pane);
   history.replaceState(null, '', `#chat/${pane.id}`);  // the chat has an address from its first message
   window.drawChatList?.();
@@ -502,7 +628,7 @@ async function ask(text) {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation: pane.id, message: text, model: currentModel && currentModel.ref,
+      body: JSON.stringify({ conversation: pane.id, message: text, models: turnModels(pane),
         web_search: pane.webSearch, mode: pane.mode }),
     });
     if (!response.ok) {
@@ -515,11 +641,27 @@ async function ask(text) {
   } finally {
     finish();
     pane.busy = pane.waiting = false;
-    if (conversation === pane.id) send.disabled = false;
+    if (conversation === pane.id) drawSend(pane);
     else { pane.el.remove(); panes.delete(pane.id); }  // reopening replays the saved chat
     refreshChatList();
   }
 }
+
+// While a reply runs, Send becomes Stop: it stops every model answering (each compared model
+// also has its own Stop in its column).
+function drawSend(pane) {
+  send.hidden = pane.busy;
+  stopButton.hidden = !pane.busy;
+  stopButton.disabled = false;
+}
+
+stopButton.onclick = async () => {
+  const pane = currentPane();
+  if (!pane?.busy) return;
+  stopButton.disabled = true;
+  try { await sendJSON('/api/chat/stop', 'POST', { conversation: pane.id }); }
+  catch (err) { stopButton.disabled = false; alert(err.message); }
+};
 
 form.addEventListener('submit', async e => {
   e.preventDefault();

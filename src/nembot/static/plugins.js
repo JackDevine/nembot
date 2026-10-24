@@ -18,14 +18,22 @@ window.nembot = {
         total: table.total ?? table.rows.length }),
       renderPlot: plot => renderPlot({ sql: plot.sql || '', spec: plot.spec, plot_spec: plot.spec }),
       renderMarkdown: text => { const div = el('div'); div.innerHTML = renderMarkdown(text); return div; },
+      sqlBlock: (title, sql) => sqlBlock(title, sql),
+      details: (title, body) => details(title, body),
+      jsonTree: value => jsonTree(value),
+      dataTable: options => createDataTable(options),  // { columns: [{name}], rows, total, exportName }
       askChat: text => askAbout(text),
+      // tab.render(container, rest): ``rest`` is whatever follows the tab's address
+      // (#plugin/<plugin>/<tab>/<rest>), so a tab can have pages of its own.
       addTab(tab) {
         const route = `plugin/${name}/${tab.id}`;
         pluginRegistry.tabs.push({ ...tab, plugin: name, route });
         drawPluginNav();
-        if (location.hash.slice(1) === route) window.dispatchEvent(new HashChangeEvent('hashchange'));
+        const hash = location.hash.slice(1);
+        if (hash === route || hash.startsWith(`${route}/`)) window.dispatchEvent(new HashChangeEvent('hashchange'));
       },
       onChatEvent(kind, handler) { (pluginRegistry.chatEvents[name] ||= {})[kind] = handler; },
+      // factory(result, question): result is the chat table/plot event, question the user's message.
       addResultAction(factory) { pluginRegistry.resultActions.push({ plugin: name, factory }); },
     };
     try { body(api); } catch (err) { console.error(`plugin ${name} client.js failed`, err); }
@@ -47,20 +55,20 @@ function drawPluginNav() {
 }
 
 function showPluginTab(route) {
-  const tab = pluginRegistry.tabs.find(t => t.route === route);
+  const tab = pluginRegistry.tabs.find(t => route === t.route || route.startsWith(`${t.route}/`));
   pluginView.replaceChildren();
   if (!tab) { pluginView.append(el('p', 'empty', 'This plugin tab is not loaded (yet).')); return; }
   const container = el('div', 'plugin-tab');
   pluginView.append(container);
-  try { tab.render(container); } catch (err) { container.append(el('div', 'error', `⚠️ ${tab.plugin}: ${err.message}`)); }
+  try { tab.render(container, route.slice(tab.route.length + 1)); } catch (err) { container.append(el('div', 'error', `⚠️ ${tab.plugin}: ${err.message}`)); }
 }
 
 // Buttons plugins add next to chat tables and plots.
-function pluginResultActions(result) {
+function pluginResultActions(result, question) {
   const out = [];
   for (const { plugin, factory } of pluginRegistry.resultActions) {
     try {
-      const node = factory(result);
+      const node = factory(result, question);
       if (node) out.push(node);
     } catch (err) { console.error(`plugin ${plugin} result action failed`, err); }
   }

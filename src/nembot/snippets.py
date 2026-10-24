@@ -7,10 +7,9 @@ from datetime import datetime
 import json
 import re
 
-import altair
 import duckdb
 
-from .chat import run_query, table_event, _records
+from .chat import chart_spec, run_query, table_event, _records
 
 SCHEMA = """
 CREATE SCHEMA IF NOT EXISTS snippets;
@@ -117,8 +116,7 @@ def run(db, snippet: dict) -> dict:
     events = [table_event(result)]
     if snippet['plot_spec']:
         try:
-            full = altair.Chart.from_dict({**snippet['plot_spec'], 'data': {'values': _records(result)}},
-                                          validate=True).to_dict()
+            full = chart_spec(snippet['plot_spec'], _records(result))
             events.insert(0, {'type': 'plot', 'sql': snippet['sql'], 'spec': full, 'plot_spec': snippet['plot_spec']})
         except Exception as exc:
             return {'error': f'Plot failed: {exc}', 'events': events}

@@ -21,11 +21,10 @@ import html
 import json
 import uuid
 
-import altair
 import vl_convert
 
 from . import reports
-from .chat import _SCHEMA_GUIDE, _WEB_SEARCH, _jsonable, prepare_spec, run_query
+from .chat import _SCHEMA_GUIDE, _WEB_SEARCH, _jsonable, chart_spec, prepare_spec, run_query
 
 SCHEMA = """
 CREATE SCHEMA IF NOT EXISTS docs;
@@ -168,7 +167,7 @@ def chart_png(attrs: dict) -> str | None:
     """A PNG of a chart snapshot (base64), for models that can read images."""
     records = [dict(zip(attrs['columns'], row)) for row in attrs['rows']]
     try:
-        full = altair.Chart.from_dict({**attrs['plot_spec'], 'data': {'values': records}}, validate=True).to_dict()
+        full = chart_spec(attrs['plot_spec'], records)
         return base64.standard_b64encode(vl_convert.vegalite_to_png(full, scale=1)).decode()
     except Exception:
         return None

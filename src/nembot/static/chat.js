@@ -209,6 +209,15 @@ input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
 });
 
+// The message box grows with the message, and Send is dimmed while it's empty.
+function fitInput() {
+  form.classList.toggle('empty', !input.value.trim());
+  input.style.height = 'auto';
+  input.style.height = `${input.scrollHeight}px`;
+}
+input.addEventListener('input', fitInput);
+fitInput();
+
 // The popup for a request_download tool call: approve (optionally changing months) or decline.
 function downloadRequestCard(event, chatId) {
   const card = el('div', 'download-card');
@@ -668,6 +677,7 @@ form.addEventListener('submit', async e => {
   const text = input.value.trim();
   if (!text || currentPane().busy) return;
   input.value = '';
+  fitInput();
   await ask(text);
   if (currentPane()?.id && !currentPane().busy) input.focus();
 });
@@ -676,6 +686,7 @@ form.addEventListener('submit', async e => {
 function askAbout(text) {
   location.hash = '#chat';
   input.value = text;
+  fitInput();
   input.focus();
   input.setSelectionRange(text.length, text.length);
 }

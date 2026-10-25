@@ -55,7 +55,7 @@ class Catalog:
     async def _claude_models(self) -> list[ModelInfo]:
         try:
             listed = [m async for m in self._claude.models.list(limit=100)]
-        except anthropic.APIError as exc:
+        except (anthropic.APIError, anthropic.CredentialsError) as exc:  # e.g. logged out of the `ant` profile
             self.errors.append(f'Claude models unavailable: {exc}')
             return []
         # Every Claude model served by the models API accepts images and tools.

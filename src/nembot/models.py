@@ -1,21 +1,18 @@
-"""Model catalogue: Claude models from Anthropic plus the OpenRouter catalogue."""
+"""Model catalogue: the models of every connected service (see connections.py), cached for an hour."""
 import asyncio
 from dataclasses import asdict, dataclass
-import os
 import time
 
 import anthropic
-import httpx2 as httpx
 
 DEFAULT_MODEL = 'claude:claude-opus-5-5'
-OPENROUTER_MODELS = 'https://openrouter.ai/api/v1/models'
 CACHE_SECONDS = 3600
 
 
 @dataclass(frozen=True)
 class ModelInfo:
     ref: str            # '<provider>:<model id>', unique across providers
-    provider: str       # 'claude' (direct Anthropic API) or 'openrouter'
+    provider: str       # 'claude' (Anthropic API), 'subscription' (Claude plan) or a preset name (presets.py)
     id: str
     name: str
     vision: bool        # accepts image input, so it can inspect plots
@@ -26,89 +23,62 @@ class ModelInfo:
     price_out: float | None = None
 
 
+async def claude_models(client: anthropic.AsyncAnthropic) -> list[ModelInfo]:
+    """Claude models from the Anthropic models API. Every one accepts images and tools."""
+    listed = [m async for m in client.models.list(limit=100)]
+    return [ModelInfo(f'claude:{m.id}', 'claude', m.id, m.display_name, True, True, True,
+                      getattr(m, 'max_input_tokens', None)) for m in listed]
+
+
 class Catalog:
-    def __init__(self, claude: anthropic.AsyncAnthropic, plan_models=None):
-        self._claude = claude
-        self._plan_models = plan_models  # async () -> (models, error): the Claude plan's models (subscription.py)
+    """``sources()`` returns {label: async () -> list[ModelInfo]} for the services connected right now.
+
+    A source that fails is reported in ``errors`` (e.g. "Claude models unavailable: …") and skipped.
+    ``preferred`` lists refs to default to, in order, when they're available.
+    """
+
+    def __init__(self, sources, preferred=()):
+        self._sources = sources
+        self.preferred = list(preferred)
         self._models: dict[str, ModelInfo] = {}
         self._fetched = 0.0
         self._lock = asyncio.Lock()
         self.errors: list[str] = []
 
+    def invalidate(self) -> None:
+        self._fetched = 0.0
+
     async def models(self) -> dict[str, ModelInfo]:
         async with self._lock:
-            if not self._models or time.monotonic() - self._fetched > CACHE_SECONDS:
-                self.errors = []
-                plan, claude, openrouter = await asyncio.gather(
-                    self._subscription_models(), self._claude_models(), self._openrouter_models())
-                models = {m.ref: m for m in plan + claude + openrouter}
-                if models:
-                    self._models, self._fetched = models, time.monotonic()
+            if not self._fetched or time.monotonic() - self._fetched > CACHE_SECONDS:
+                sources = self._sources()
+                results = await asyncio.gather(*(self._fetch(label, fetch) for label, fetch in sources.items()))
+                self.errors = [error for _, error in results if error]
+                self._models = {m.ref: m for models, _ in results for m in models}
+                self._fetched = time.monotonic()
             return self._models
+
+    @staticmethod
+    async def _fetch(label: str, fetch) -> tuple[list[ModelInfo], str | None]:
+        try:
+            return await asyncio.wait_for(fetch(), 60), None
+        except Exception as exc:  # e.g. logged out of the `ant` profile, a key revoked, a local server stopped
+            return [], f'{label} models unavailable: {exc}'
 
     async def get(self, ref: str) -> ModelInfo | None:
         models = await self.models()
-        if ref in models:
-            return models[ref]
-        if ref == DEFAULT_MODEL:  # usable even if the models API could not be reached
-            return ModelInfo(ref, 'claude', ref.split(':', 1)[1], 'Claude Opus 5.5', True, True, True)
-        return None
+        return models.get(ref)
+
+    def usable(self) -> list[ModelInfo]:
+        return [m for m in self._models.values() if m.tools and m.available]
 
     def default(self) -> str:
-        """DEFAULT_MODEL, or the same model through the Claude plan when the API isn't signed in."""
-        plan = 'subscription:' + DEFAULT_MODEL.split(':', 1)[1]
-        return plan if DEFAULT_MODEL not in self._models and plan in self._models else DEFAULT_MODEL
-
-    async def _subscription_models(self) -> list[ModelInfo]:
-        if self._plan_models is None:
-            return []
-        try:
-            models, error = await asyncio.wait_for(self._plan_models(), 60)
-        except Exception as exc:  # Claude Code missing or failing to start
-            models, error = [], f'Claude plan models unavailable: {type(exc).__name__}: {exc}'
-        if error:
-            self.errors.append(error)
-        return models
-
-    async def _claude_models(self) -> list[ModelInfo]:
-        try:
-            listed = [m async for m in self._claude.models.list(limit=100)]
-        except (anthropic.APIError, anthropic.CredentialsError) as exc:  # e.g. logged out of the `ant` profile
-            self.errors.append(f'Claude models unavailable: {exc}')
-            return []
-        # Every Claude model served by the models API accepts images and tools.
-        return [ModelInfo(f'claude:{m.id}', 'claude', m.id, m.display_name, True, True, True,
-                          getattr(m, 'max_input_tokens', None)) for m in listed]
-
-    async def _openrouter_models(self) -> list[ModelInfo]:
-        try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.get(OPENROUTER_MODELS)
-                response.raise_for_status()
-                data = response.json()['data']
-        except Exception as exc:
-            self.errors.append(f'OpenRouter models unavailable: {exc}')
-            return []
-        available = bool(os.environ.get('OPENROUTER_API_KEY'))
-        models = []
-        for m in data:
-            inputs = m.get('architecture', {}).get('input_modalities') or []
-            if 'text' not in (m.get('architecture', {}).get('output_modalities') or ['text']):
-                continue  # image/audio generators can't drive a chat
-            pricing = m.get('pricing') or {}
-            models.append(ModelInfo(
-                f"openrouter:{m['id']}", 'openrouter', m['id'], m.get('name') or m['id'],
-                'image' in inputs, 'tools' in (m.get('supported_parameters') or []), available,
-                m.get('context_length'), _per_million(pricing.get('prompt')), _per_million(pricing.get('completion')),
-            ))
-        return models
-
-
-def _per_million(value) -> float | None:
-    try:
-        return round(float(value) * 1_000_000, 4)
-    except (TypeError, ValueError):
-        return None
+        """The first preferred model that's available, else the first usable one, else DEFAULT_MODEL."""
+        usable = {m.ref for m in self.usable()}
+        for ref in self.preferred:
+            if ref in usable:
+                return ref
+        return next(iter(m.ref for m in self.usable()), DEFAULT_MODEL)
 
 
 def public(model: ModelInfo) -> dict:

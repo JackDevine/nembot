@@ -92,7 +92,8 @@ const MAX_COMPARE = 4;
 const compareChips = document.getElementById('compare-chips');
 
 // Where a model runs: the Anthropic API, the user's Claude plan (through Claude Code), or OpenRouter.
-const PROVIDERS = [['subscription', 'Claude plan', 'Claude (your Claude plan, through Claude Code)'],
+// Replaced by the server's list (/api/models) once models load.
+let PROVIDERS = [['subscription', 'Claude plan', 'Claude (your Claude plan, through Claude Code)'],
   ['claude', 'Claude', 'Claude (Anthropic API)'], ['openrouter', 'OpenRouter', 'OpenRouter']];
 function providerLabel(provider) { return (PROVIDERS.find(p => p[0] === provider) || [, provider])[1]; }
 
@@ -153,7 +154,7 @@ function drawModels() {
       const compared = compareModels.some(c => c.ref === m.ref);
       const row = el('div', 'model' + (usable ? '' : ' disabled') + (currentModel && m.ref === currentModel.ref ? ' current' : '')
         + (compared ? ' compared' : ''));
-      row.title = !m.available ? 'Provider credentials are not configured (OPENROUTER_API_KEY).'
+      row.title = !m.available ? 'This service is not connected. Connect it on the Settings page.'
         : !m.tools ? 'This model does not support tool calling, so it cannot query the database.' : m.id;
       row.append(el('span', '', m.name), modelBadges(m));
       if (usable) {
@@ -181,6 +182,7 @@ async function loadModels() {
   const response = await fetch('/api/models');
   const body = await response.json();
   models = body.models;
+  if (body.providers) PROVIDERS = body.providers.map(p => [p.name, p.label, p.title]);
   body.errors.forEach(message => console.warn(message));
   const saved = models.find(m => m.ref === localStorage.getItem('model') && m.tools && m.available);
   const fallback = models.find(m => m.ref === body.default) || { ref: body.default, provider: 'claude', name: 'Claude Opus 5.5', vision: true };

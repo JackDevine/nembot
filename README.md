@@ -51,12 +51,23 @@ uv run nembot-chat   # http://127.0.0.1:8000
 ```
 
 A localhost chat analyst over `data/nem.duckdb` (opened read-only) that
-answers with SQL tables and interactive Vega-Lite plots. Pick the model next to
-the chat input: Claude through your Claude plan (Pro/Max/Team, using the
-Claude Code login on this machine via the Claude Agent SDK; usage counts toward
-the plan's limits), any Claude model via the Anthropic API (credentials from
-`ant auth login` or `ANTHROPIC_API_KEY`), or any tool-capable OpenRouter model
-(`OPENROUTER_API_KEY`). You can switch models mid-conversation; text-only
+answers with SQL tables and interactive Vega-Lite plots.
+
+On first run the app opens a **Settings** page to connect an AI service. The
+model must support tool calling, and each connection is tested before it's
+saved:
+
+- **OpenRouter**: "Sign in with OpenRouter" (no key copying), or paste a key.
+- **Anthropic API**: paste a key, or use an existing `ant auth login`.
+- **OpenAI, Google Gemini, DeepSeek**: paste a key (community tested).
+- **Ollama / LM Studio**: models running on your computer, free. Ollama runs
+  with a 16k-token context; set `num_ctx` under `[providers.ollama]` to change it.
+
+Keys are saved in `~/.config/nembot/credentials.toml` (readable only by you), or
+in the system keychain after `uv sync --extra keyring`. Environment variables
+(`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
+`DEEPSEEK_API_KEY`) take priority. The page also offers to download the latest
+month of prices and demand to start with. Pick the model next to the chat input. You can switch models mid-conversation; text-only
 models still make plots but can't see them. A **Web search** toggle lets the
 model search the web for context (billed per search); sources are listed under
 the reply. Flags: `--database`, `--host`,

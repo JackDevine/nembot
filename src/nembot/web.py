@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import anthropic
 import claude_agent_sdk
@@ -18,14 +19,14 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import chats, client, docs, downloads, explorer, live, plugins, reports, snippets, subscription
+from . import chats, client, credentials, docs, downloads, explorer, live, plugins, reports, setup, snippets, subscription
 from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
 from .chat import MAX_COMPARE, Conversation, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
-from .claude import ClaudeProvider
-from .models import Catalog, public
-from .openrouter import OpenRouterProvider
+from .connections import Connections
+from .presets import PRESETS
+from .models import public
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -38,6 +39,8 @@ class RevalidatingStaticFiles(StaticFiles):
         response.headers['Cache-Control'] = 'no-cache'
         return response
 
+
+log = logging.getLogger(__name__)
 
 def _json_default(value):
     """JSON for plugin route results: numbers stay numbers, dates become ISO strings."""
@@ -101,11 +104,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         doc = await asyncio.to_thread(docs.create, db, title, seed=seed, conversation=conversation_id)
         return {'id': doc['id'], 'title': doc['title'], 'missing': missing, 'errors': errors}
 
-    claude = anthropic.AsyncAnthropic()
-    catalog = Catalog(claude, subscription.list_models)
-    providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider(),
-                 'subscription': subscription.SubscriptionProvider(
-                     session_dir=Path(database).absolute().parent / 'claude-sessions')}
+    connections = Connections(session_dir=Path(database).absolute().parent / 'claude-sessions')
+    catalog, providers = connections.catalog, connections.providers
     conversations: dict[str, Conversation] = {}
 
     async def index(request: Request):
@@ -114,7 +114,103 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     async def models(request: Request):
         listed = await catalog.models()
         return JSONResponse({'default': catalog.default(), 'errors': catalog.errors,
+                             'providers': connections.labels(),
                              'models': [public(m) for m in listed.values()]})
+
+    # ---- Setup (onboarding and Settings): only for requests from this computer ----
+    def setup_guard(request: Request) -> Response | None:
+        """Refuse other machines, and pages from other sites (which could post here from your browser)."""
+        refused = setup.refusal(request.client.host if request.client else '', request.headers.get('origin'),
+                                {f'{request.url.scheme}://{request.url.netloc}', url.rstrip('/')},
+                                request.method, request.headers.get('content-type', ''))
+        return JSONResponse({'error': refused[1]}, status_code=refused[0]) if refused else None
+
+    async def setup_status(request: Request):
+        if refused := setup_guard(request):
+            return refused
+        await catalog.models()
+        return JSONResponse({'cards': await connections.status(), 'usable': len(catalog.usable()),
+                             'errors': catalog.errors, 'config': str(credentials.path()),
+                             'keyring': bool(credentials.setting('keyring', False)),
+                             'keyring_available': credentials.keyring_available(),
+                             'has_data': await asyncio.to_thread(setup_has_data)})
+
+    def setup_has_data() -> bool:
+        cursor = db.cursor()
+        try:
+            return bool(cursor.execute("SELECT count(*) FROM _nembot.files").fetchone()[0])
+        except duckdb.Error:
+            return False
+        finally:
+            cursor.close()
+
+    async def setup_connect(request: Request):
+        """Test a connection and save it if the service answered (the key itself is never sent back)."""
+        if refused := setup_guard(request):
+            return refused
+        body = await request.json()
+        name = str(body.get('name', ''))
+        if name not in ('claude', *PRESETS):
+            return JSONResponse({'error': 'unknown service'}, status_code=400)
+        key = str(body.get('key') or '').strip() or None
+        base_url = str(body.get('base_url') or '').strip().rstrip('/') or None
+        result = await setup.check(name, key=key, base_url=base_url, model=body.get('model'))
+        if result['listed']:
+            preset = PRESETS.get(name)
+            fields = {}
+            if preset and preset.local:
+                fields = {'enabled': True, 'base_url': base_url if base_url and base_url != preset.base_url else None}
+            await asyncio.to_thread(credentials.save_provider, name, api_key=key, **fields)
+            connections.refresh()
+            result['saved'] = True
+        return JSONResponse(result)
+
+    async def setup_forget(request: Request):
+        if refused := setup_guard(request):
+            return refused
+        name = str((await request.json()).get('name', ''))
+        await asyncio.to_thread(credentials.forget_provider, name)
+        connections.refresh()
+        return JSONResponse({'ok': True})
+
+    async def setup_settings(request: Request):
+        if refused := setup_guard(request):
+            return refused
+        body = await request.json()
+        if 'keyring' in body:
+            try:
+                await asyncio.to_thread(credentials.use_keyring, bool(body['keyring']))
+            except Exception as exc:
+                return JSONResponse({'error': str(exc)}, status_code=400)
+        connections.refresh()
+        return JSONResponse({'ok': True})
+
+    def openrouter_callback_url() -> str:
+        # OpenRouter accepts localhost callbacks on any port.
+        return f'http://localhost:{urlsplit(url).port or 80}/setup/openrouter/callback'
+
+    async def setup_openrouter_start(request: Request):
+        if refused := setup_guard(request):
+            return refused
+        return JSONResponse({'url': setup.openrouter_start(openrouter_callback_url())})
+
+    async def setup_openrouter_callback(request: Request):
+        host = request.client.host if request.client else ''
+        if host not in ('127.0.0.1', '::1'):
+            return JSONResponse({'error': 'Settings can only be changed from this computer.'}, status_code=403)
+        params = request.query_params
+        back = url.rstrip('/') + '/#setup'
+        try:
+            key = await setup.openrouter_finish(params.get('state', ''), params.get('code', ''))
+            result = await setup.check('openrouter', key=key)
+            if not result['listed']:
+                raise ValueError(result['steps'][-1]['detail'] if result['steps'] else 'OpenRouter did not answer.')
+            await asyncio.to_thread(credentials.save_provider, 'openrouter', api_key=key)
+            connections.refresh()
+            return RedirectResponse(back + '/connected/openrouter')
+        except Exception as exc:
+            log.warning('OpenRouter sign-in failed: %s', exc)
+            return RedirectResponse(back + '/error/' + quote(str(exc)[:300]))
 
     async def chat(request: Request):
         body = await request.json()
@@ -642,6 +738,12 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     return Starlette(lifespan=lifespan, routes=[
         Route('/', index),
         Route('/api/models', models),
+        Route('/api/setup', setup_status),
+        Route('/api/setup/connect', setup_connect, methods=['POST']),
+        Route('/api/setup/forget', setup_forget, methods=['POST']),
+        Route('/api/setup/settings', setup_settings, methods=['POST']),
+        Route('/api/setup/openrouter/start', setup_openrouter_start, methods=['POST']),
+        Route('/setup/openrouter/callback', setup_openrouter_callback),
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
         Route('/api/chat/keep', chat_keep, methods=['POST']),

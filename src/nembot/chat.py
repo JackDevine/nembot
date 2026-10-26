@@ -657,6 +657,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     ``doc_session`` runs the suggest_* tools when nembot is tagged in a document.
     """
     provider = providers[model.provider]
+    web_search = web_search and getattr(provider, 'web_search', True)  # e.g. Ollama has no web search
     history = conversation.history
     start = len(history)
     partial = []

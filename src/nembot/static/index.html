@@ -29,6 +29,7 @@
   </div>
   <div class="header-right">
     <a id="download-indicator" class="download-indicator"></a>
+    <a href="#setup" class="header-link" id="settings-link" title="Connect AI services and manage keys">Settings</a>
     <button id="about-button" type="button" class="link-like" title="Where the data comes from and how it may be used">Data: AEMO</button>
   </div>
 </header>
@@ -114,6 +115,10 @@
   <main id="plugin-view"></main>
 </section>
 
+<section id="setup-view" class="view">
+  <main id="setup-page"></main>
+</section>
+
 <section id="reports-view" class="view">
   <main id="report-view"></main>
 </section>
@@ -129,12 +134,14 @@
 <script src="/static/chats.js"></script>
 <script src="/static/reports.js"></script>
 <script src="/static/plugins.js"></script>
+<script src="/static/setup.js"></script>
 <script>
-// Hash routing: #chat[/<id>], #explorer[/<TABLE>], #docs[/<id>], #snippets[/<id>], #reports, #plugins, #plugin/<plugin>/<tab>.
+// Hash routing: #chat[/<id>], #explorer[/<TABLE>], #docs[/<id>], #snippets[/<id>], #reports, #plugins,
+// #plugin/<plugin>/<tab>, #setup[/connected/<service> | /error/<message>].
 function route() {
   const hash = location.hash.slice(1) || 'chat';
   const [view, ...rest] = hash.split('/');
-  const name = ['chat', 'explorer', 'docs', 'snippets', 'reports', 'plugins', 'plugin'].includes(view) ? view : 'chat';
+  const name = ['chat', 'explorer', 'docs', 'snippets', 'reports', 'plugins', 'plugin', 'setup'].includes(view) ? view : 'chat';
   const section = name === 'plugin' ? 'plugin-view-section' : `${name}-view`;
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === section));
   // A plugin tab's own pages (#plugin/<plugin>/<tab>/...) keep its link highlighted.
@@ -147,6 +154,8 @@ function route() {
   if (name === 'reports') showReports();
   if (name === 'plugins') showPluginsPage();
   if (name === 'plugin') showPluginTab(hash);
+  if (name === 'setup') showSetup(rest.join('/'));
+  document.getElementById('settings-link').classList.toggle('active', name === 'setup');
 }
 window.addEventListener('hashchange', route);
 route();

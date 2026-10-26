@@ -487,26 +487,48 @@ function replyRenderer(reply, pane, text, replay) {
   let segment = null, markdown = '';
   const scroll = () => { if (shown()) log.scrollTop = log.scrollHeight; };
   const place = node => { status.parentNode === reply ? reply.insertBefore(node, status) : reply.append(node); scroll(); };
+  // Reasoning streams into an open dropdown, which folds itself once the model moves on.
+  function endSegment() {
+    if (segment?.reasoning) {
+      const seconds = segment.started ? Math.round((performance.now() - segment.started) / 1000) : null;
+      segment.summary.textContent = seconds ? `Reasoned for ${seconds} s` : 'Reasoning';
+      segment.open = false;
+      segment.classList.remove('streaming');
+    }
+    segment = null;
+  }
 
   function handle(event) {
     switch (event.type) {
-      case 'block': segment = null; break;
+      case 'block': endSegment(); break;
       case 'text':
-        if (!segment || segment.className !== 'text') { segment = el('div', 'text'); markdown = ''; place(segment); }
+        if (!segment || segment.className !== 'text') { endSegment(); segment = el('div', 'text'); markdown = ''; place(segment); }
         markdown += event.delta;
         segment.innerHTML = renderMarkdown(markdown);
         scroll();
         break;
       case 'progress':
-        if (!segment || segment.className !== 'progress') { segment = el('div', 'progress'); place(segment); }
-        segment.textContent += event.delta;
+        if (!segment?.reasoning) {
+          endSegment();
+          segment = el('details', 'reasoning streaming');
+          segment.reasoning = true;
+          segment.open = true;
+          segment.started = replay ? null : performance.now();
+          segment.summary = el('summary', '', 'Thinking…');
+          segment.body = el('div', 'progress');
+          segment.append(segment.summary, segment.body);
+          place(segment);
+        }
+        segment.body.textContent += event.delta;
+        segment.body.scrollTop = segment.body.scrollHeight;
+        scroll();
         break;
       case 'model':
         reply.prepend(el('div', 'via', `${providerLabel(event.model.provider)} · ${event.model.name}`));
         break;
       case 'tool':
       case 'tool_running':
-        segment = null;
+        endSegment();
         label.textContent = { visualize_mms: 'Building plot…', query_mms: 'Running query…',
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           create_report: 'Building the report (re-running its queries)…',
@@ -517,9 +539,9 @@ function replyRenderer(reply, pane, text, replay) {
           install_plugin: 'Preparing to install…',
           web_search: 'Searching the web…', web_fetch: 'Reading a web page…', code_execution: 'Filtering web results…' }[event.name] || `Running ${event.name}…`;
         break;
-      case 'plot': segment = null; place(renderPlot(event, resultActions(event, text))); break;
+      case 'plot': endSegment(); place(renderPlot(event, resultActions(event, text))); break;
       case 'sources': {
-        segment = null;
+        endSegment();
         const box = el('div', 'sources', event.kind === 'cited' ? 'Sources' : 'Web pages consulted');
         const list = el('ol');
         for (const source of event.sources) {
@@ -530,19 +552,19 @@ function replyRenderer(reply, pane, text, replay) {
         box.append(list); place(box);
         break;
       }
-      case 'table': segment = null; place(renderTable(event, event.plugin ? null : resultActions(event, text))); break;
+      case 'table': endSegment(); place(renderTable(event, event.plugin ? null : resultActions(event, text))); break;
       case 'plugin_event':
-        segment = null;
+        endSegment();
         if (!renderPluginEvent(event, place)) place(el('pre', 'muted', `${event.plugin} · ${event.kind}: ${JSON.stringify(event.data)}`));
         break;
       case 'plugin_file': {
-        segment = null;
+        endSegment();
         const lines = event.content.split('\n').length;
         place(details(`📝 Wrote ${event.plugin}/${event.path} (${lines} line${lines === 1 ? '' : 's'})`, el('pre', '', event.content)));
         break;
       }
       case 'plugin_test': {
-        segment = null;
+        endSegment();
         const r = event.report;
         const ok = r.ok;
         const summary = ok ? `✓ Test passed for ${event.plugin}` : `✗ Test found problems in ${event.plugin}`;
@@ -553,11 +575,11 @@ function replyRenderer(reply, pane, text, replay) {
         break;
       }
       case 'plugin_install_request':
-        place(pluginInstallCard(event, pane.id)); label.textContent = 'Waiting for your answer…'; segment = null; waiting(true);
+        place(pluginInstallCard(event, pane.id)); label.textContent = 'Waiting for your answer…'; endSegment(); waiting(true);
         break;
       case 'plugin_install_result': {
         waiting(false);
-        segment = null;
+        endSegment();
         const card = reply.querySelector(`.install-card[data-request="${CSS.escape(event.id)}"]`);
         const target = card ? card.querySelector('.install-status') : null;
         const message = event.status === 'loaded' ? el('span', 'ok', `✓ Installed ${event.plugin}. `)
@@ -575,7 +597,7 @@ function replyRenderer(reply, pane, text, replay) {
       }
       case 'notice': label.textContent = event.message; break;
       case 'report': {
-        segment = null;
+        endSegment();
         const card = el('div', 'report-card');
         card.append(el('span', 'report-icon', '📄'), el('b', '', event.title),
           el('span', 'muted', ` ${FORMAT_LABELS[event.format] || event.format} · ${formatBytes(event.bytes)}`), reportLinks(event));
@@ -583,7 +605,7 @@ function replyRenderer(reply, pane, text, replay) {
         break;
       }
       case 'document': {
-        segment = null;
+        endSegment();
         const card = el('div', 'report-card');
         const open = el('a', '', 'Open beside chat'); open.href = '#chat';
         open.onclick = e => { e.preventDefault(); openDocBeside(event.id); };
@@ -595,7 +617,7 @@ function replyRenderer(reply, pane, text, replay) {
         break;
       }
       case 'download_request':
-        segment = null;
+        endSegment();
         place(downloadRequestCard(event, pane.id));
         label.textContent = 'Waiting for your answer…';
         waiting(true);
@@ -612,9 +634,9 @@ function replyRenderer(reply, pane, text, replay) {
         label.textContent = event.type === 'download_progress' || event.type === 'download_started' ? 'Downloading…' : 'Thinking…';
         break;
       }
-      case 'error': segment = null; place(el('div', 'error', `⚠️ ${event.message}`)); break;
+      case 'error': endSegment(); place(el('div', 'error', `⚠️ ${event.message}`)); break;
       case 'stopped':  // the user pressed Stop: what was written stays, approval cards can't be answered
-        segment = null;
+        endSegment();
         status.remove();
         reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button').forEach(b => { b.disabled = true; });
         place(el('div', 'stopped-note', '■ Stopped'));
@@ -627,6 +649,7 @@ function replyRenderer(reply, pane, text, replay) {
   }
 
   function finish() {
+    endSegment();
     status.remove();
     // Approval cards from a saved chat can't be answered any more.
     if (replay) reply.querySelectorAll('.download-card .buttons button').forEach(b => { b.disabled = true; });

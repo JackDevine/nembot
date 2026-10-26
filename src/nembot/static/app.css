@@ -30,6 +30,16 @@ header h1 .logo { width: 28px; height: 28px; }
 .user { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; white-space: pre-wrap; }
 .assistant > * { margin-top: 10px; }
 .progress { color: var(--muted); font-style: italic; font-size: 14px; white-space: pre-wrap; }
+/* Model reasoning: open while it streams, folded into a dropdown once the model moves on. */
+details.reasoning > summary { cursor: pointer; color: var(--muted); font-size: 13px; width: fit-content; list-style: none; }
+details.reasoning > summary::-webkit-details-marker { display: none; }
+details.reasoning > summary::after { content: ' ▸'; font-size: 11px; }
+details.reasoning[open] > summary::after { content: ' ▾'; }
+details.reasoning.streaming > summary::after { content: ''; }
+details.reasoning.streaming > summary { animation: nb-pulse 1.6s ease-in-out infinite; }
+@keyframes nb-pulse { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) { details.reasoning.streaming > summary { animation: none; } }
+details.reasoning > .progress { margin-top: 4px; padding-left: 10px; border-left: 2px solid var(--border); max-height: 40vh; overflow-y: auto; }
 .status { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 8px; }
 
 /* Chat throbber: bolts pop in left, middle, right while the robot hops and its eyes brighten;

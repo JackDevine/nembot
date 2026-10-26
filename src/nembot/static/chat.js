@@ -273,6 +273,77 @@ function downloadRequestCard(event, chatId) {
   return card;
 }
 
+// The card for a questionnaire tool call: multiple-choice questions, each with a free-text answer.
+function questionsCard(event, chatId) {
+  const card = el('div', 'questions-card');
+  card.dataset.request = event.id;
+  const inputs = [];
+  const submit = el('button', 'primary', 'Submit'), skip = el('button', '', 'Skip');
+  submit.type = skip.type = 'button';
+  const status = el('div', 'questions-status');
+  event.questions.forEach((q, qi) => {
+    const box = el('fieldset', 'question');
+    const legend = el('legend');
+    if (q.header) legend.append(el('span', 'question-header', q.header));
+    legend.append(el('span', 'question-text', q.question));
+    box.append(legend);
+    const type = q.multi_select ? 'checkbox' : 'radio';
+    const name = `q-${event.id}-${qi}`;
+    const choices = q.options.map(option => {
+      const label = el('label', 'question-option');
+      const input = el('input'); input.type = type; input.name = name; input.value = option.label;
+      const words = el('span'); words.append(el('b', '', option.label));
+      if (option.description) words.append(el('span', 'muted', option.description));
+      label.append(input, words);
+      box.append(label);
+      return input;
+    });
+    const otherLabel = el('label', 'question-option question-other');
+    const otherPick = el('input'); otherPick.type = type; otherPick.name = name;
+    const other = el('input'); other.type = 'text'; other.placeholder = 'Something else…'; other.maxLength = 2000;
+    otherLabel.append(otherPick, other);
+    other.oninput = () => { otherPick.checked = other.value.trim() !== '' || otherPick.checked; ready(); };
+    other.onfocus = () => { otherPick.checked = true; ready(); };
+    otherPick.onchange = () => { if (otherPick.checked) other.focus(); ready(); };
+    choices.forEach(c => { c.onchange = ready; });
+    box.append(otherLabel);
+    inputs.push({ choices, otherPick, other });
+    card.append(box);
+  });
+  const answers = () => inputs.map(({ choices, otherPick, other }) => ({
+    selected: choices.filter(c => c.checked).map(c => c.value),
+    other: otherPick.checked ? other.value.trim() : '',
+  }));
+  function ready() { submit.disabled = answers().some(a => !a.selected.length && !a.other); }
+  const send = async body => {
+    submit.disabled = skip.disabled = true;
+    card.querySelectorAll('input').forEach(i => { i.disabled = true; });
+    try { await sendJSON('/api/chat/answer', 'POST', { conversation: chatId, request: event.id, ...body }); }
+    catch (err) { status.textContent = err.message; }
+  };
+  submit.onclick = () => send({ answers: answers() });
+  skip.onclick = () => send({ skipped: true });
+  const buttons = el('div', 'buttons'); buttons.append(skip, submit);
+  card.append(buttons, status);
+  ready();
+  return card;
+}
+
+// Show what was answered (live, or when a saved chat is replayed) and lock the card.
+function updateQuestionsCard(card, event) {
+  card.querySelectorAll('input').forEach(i => { i.disabled = true; });
+  card.querySelector('.buttons')?.remove();
+  const status = card.querySelector('.questions-status');
+  if (event.skipped) { status.textContent = event.timeout ? 'No answer; the questions expired.' : 'Skipped.'; return; }
+  card.querySelectorAll('fieldset.question').forEach((box, qi) => {
+    const answer = event.answers?.[qi] || { selected: [], other: '' };
+    box.querySelectorAll('.question-option:not(.question-other) input').forEach(i => { i.checked = answer.selected.includes(i.value); });
+    const [pick, text] = box.querySelectorAll('.question-other input');
+    pick.checked = Boolean(answer.other); text.value = answer.other;
+  });
+  status.replaceChildren(el('span', 'ok', '✓ Answered'));
+}
+
 function updateDownloadCard(card, event) {
   const status = card.querySelector('.download-status');
   card.querySelector('.buttons')?.remove();
@@ -616,6 +687,19 @@ function replyRenderer(reply, pane, text, replay) {
         if (!replay && shown()) openDocBeside(event.id);
         break;
       }
+      case 'questions':
+        endSegment();
+        place(questionsCard(event, pane.id));
+        label.textContent = 'Waiting for your answer…';
+        waiting(true);
+        break;
+      case 'questions_answered': {
+        waiting(false);
+        const card = reply.querySelector(`.questions-card[data-request="${CSS.escape(event.id)}"]`);
+        if (card) updateQuestionsCard(card, event);
+        label.textContent = 'Thinking…';
+        break;
+      }
       case 'download_request':
         endSegment();
         place(downloadRequestCard(event, pane.id));
@@ -638,7 +722,8 @@ function replyRenderer(reply, pane, text, replay) {
       case 'stopped':  // the user pressed Stop: what was written stays, approval cards can't be answered
         endSegment();
         status.remove();
-        reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button').forEach(b => { b.disabled = true; });
+        reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button, .questions-card button, .questions-card input')
+          .forEach(b => { b.disabled = true; });
         place(el('div', 'stopped-note', '■ Stopped'));
         waiting(false);
         break;
@@ -652,7 +737,8 @@ function replyRenderer(reply, pane, text, replay) {
     endSegment();
     status.remove();
     // Approval cards from a saved chat can't be answered any more.
-    if (replay) reply.querySelectorAll('.download-card .buttons button').forEach(b => { b.disabled = true; });
+    if (replay) reply.querySelectorAll('.download-card .buttons button, .questions-card button, .questions-card input')
+      .forEach(b => { b.disabled = true; });
   }
   return { handle, finish, status };
 }

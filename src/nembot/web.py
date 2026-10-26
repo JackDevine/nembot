@@ -269,7 +269,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             async with conversation.lock:
                 conversation.branches = None  # an earlier compare turn's choice is final now
                 options = dict(web_search=web_search, jobs=jobs, exporter=exporter, plugin_manager=plugin_manager,
-                               creator=creator, documents=lambda *a: documents(*a, conversation_id))
+                               creator=creator, documents=lambda *a: documents(*a, conversation_id),
+                               interactive=True)
                 if len(chosen) > 1:
                     turn_events = run_compare(providers, db, conversation, text, chosen, describe_error=_api_error,
                                               **options)
@@ -344,6 +345,16 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
                                     web_search=saved['web_search'], model=conversation.branches[branch]['model'],
                                     history=conversation.history, results=conversation.results, transcript=transcript)
         return JSONResponse({'ok': True, 'branch': branch})
+
+    async def chat_answer(request: Request):
+        """The user's answers to a questionnaire card (or a skip)."""
+        body = await request.json()
+        conversation = conversations.get(str(body.get('conversation', '')))
+        future = conversation and conversation.pending.get(str(body.get('request', '')))
+        if not future or future.done():
+            return JSONResponse({'error': 'these questions are no longer waiting for an answer'}, status_code=404)
+        future.set_result({'skipped': bool(body.get('skipped')), 'answers': body.get('answers')})
+        return JSONResponse({'ok': True})
 
     async def chat_decision(request: Request):
         """The user's answer to a request_download popup."""
@@ -746,6 +757,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         Route('/setup/openrouter/callback', setup_openrouter_callback),
         Route('/api/chat', chat, methods=['POST']),
         Route('/api/chat/decision', chat_decision, methods=['POST']),
+        Route('/api/chat/answer', chat_answer, methods=['POST']),
         Route('/api/chat/keep', chat_keep, methods=['POST']),
         Route('/api/chat/stop', chat_stop, methods=['POST']),
         Route('/api/chart', chart, methods=['POST']),

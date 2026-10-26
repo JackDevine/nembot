@@ -534,6 +534,122 @@ class Conversation:
 
 DECISION_TIMEOUT = 1800  # seconds to wait for the user to approve or decline a download
 
+# ---- questionnaire: multiple-choice questions for the user (interactive chats only) ----
+QUESTIONNAIRE = {
+    'name': 'questionnaire',
+    'description': (
+        'Ask the user 1-4 multiple-choice questions and wait for the answers. Use it when a choice is genuinely '
+        "the user's and changes what you do, e.g. which region, period, measure or presentation they mean. Don't "
+        'use it for things the other tools can find out, or to confirm routine steps. Each question has 2-4 '
+        'distinct options; the user can always write their own answer instead, so no "Other" option is needed.'),
+    'input_schema': {
+        'type': 'object',
+        'properties': {
+            'questions': {
+                'type': 'array', 'minItems': 1, 'maxItems': 4,
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'question': {'type': 'string', 'description': 'The full question, ending with a question mark.'},
+                        'header': {'type': 'string', 'description': 'A very short label for it (at most 12 characters).'},
+                        'options': {
+                            'type': 'array', 'minItems': 2, 'maxItems': 4,
+                            'items': {'type': 'object', 'properties': {
+                                'label': {'type': 'string', 'description': 'The choice, in 1-5 words.'},
+                                'description': {'type': 'string', 'description': 'What choosing it means, if not obvious.'}},
+                                'required': ['label']},
+                        },
+                        'multi_select': {'type': 'boolean', 'description': 'Allow choosing several options.'},
+                    },
+                    'required': ['question', 'options'],
+                },
+            },
+        },
+        'required': ['questions'],
+    },
+}
+QUESTIONNAIRE_NOTE = """
+- `questionnaire(questions)` shows the user 1-4 multiple-choice questions and waits for the answers.
+  Ask only when the answer is genuinely the user's to give and changes what you do (which region,
+  period, measure or presentation they mean). Otherwise make a sensible choice and say what you assumed.
+"""
+
+
+def parse_questions(args) -> list[dict] | str:
+    """Normalised questions, or why the input is unusable (sent back to the model)."""
+    questions = args.get('questions') if isinstance(args, dict) else None
+    if isinstance(questions, str):
+        try:
+            questions = json.loads(questions)
+        except json.JSONDecodeError:
+            questions = None
+    if not isinstance(questions, list) or not 1 <= len(questions) <= 4:
+        return 'questions must be a list of 1-4 questions.'
+    parsed = []
+    for i, q in enumerate(questions, 1):
+        if not isinstance(q, dict) or not str(q.get('question') or '').strip():
+            return f'Question {i} has no question text.'
+        options = [o if isinstance(o, dict) else {'label': str(o)} for o in q.get('options') or []]
+        options = [{'label': str(o.get('label') or '').strip()[:80], 'description': str(o.get('description') or '').strip()[:300]}
+                   for o in options if str(o.get('label') or '').strip()]
+        if not 2 <= len(options) <= 4 or len({o['label'] for o in options}) != len(options):
+            return f'Question {i} needs 2-4 options with different labels.'
+        parsed.append({'question': str(q['question']).strip()[:500], 'header': str(q.get('header') or '').strip()[:24],
+                       'options': options, 'multi_select': bool(q.get('multi_select'))})
+    return parsed
+
+
+def clean_answers(questions: list[dict], answers) -> list[dict]:
+    """The user's answers, keeping only offered labels and a short free-text answer."""
+    answers = answers if isinstance(answers, list) else []
+    cleaned = []
+    for i, q in enumerate(questions):
+        answer = answers[i] if i < len(answers) and isinstance(answers[i], dict) else {}
+        labels = {o['label'] for o in q['options']}
+        selected = [str(x) for x in answer.get('selected') or [] if str(x) in labels]
+        cleaned.append({'selected': selected if q['multi_select'] else selected[:1],
+                        'other': str(answer.get('other') or '').strip()[:2000]})
+    return cleaned
+
+
+def answers_text(questions: list[dict], answers: list[dict]) -> str:
+    lines = ['The user answered:']
+    for i, (q, a) in enumerate(zip(questions, answers), 1):
+        chosen = a['selected'] + ([f'(in their own words) {a["other"]}'] if a['other'] else [])
+        lines.append(f'{i}. {q["question"]}\n   -> ' + ('; '.join(chosen) if chosen else '(no answer)'))
+    return '\n'.join(lines)
+
+
+async def questionnaire(conversation: 'Conversation', call: dict) -> AsyncIterator[dict]:
+    """Show the questions in the chat and wait for the user's answers (or a skip)."""
+    def result(text, is_error=False):
+        return {'type': 'result', 'text': text, 'is_error': is_error}
+
+    questions = parse_questions(call['input'])
+    if isinstance(questions, str):
+        yield result(f'The questionnaire could not be shown: {questions}', True)
+        return
+    request_id = call['id']
+    future = asyncio.get_running_loop().create_future()
+    conversation.pending[request_id] = future
+    yield {'type': 'questions', 'id': request_id, 'questions': questions}
+    try:
+        reply = await asyncio.wait_for(future, DECISION_TIMEOUT)
+    except TimeoutError:
+        yield {'type': 'questions_answered', 'id': request_id, 'skipped': True, 'timeout': True}
+        yield result('The user did not answer. Make sensible choices and say what you assumed.')
+        return
+    finally:
+        conversation.pending.pop(request_id, None)
+    if reply.get('skipped'):
+        yield {'type': 'questions_answered', 'id': request_id, 'skipped': True}
+        yield result('The user skipped the questions. Make sensible choices and say what you assumed.')
+        return
+    answers = clean_answers(questions, reply.get('answers'))
+    yield {'type': 'questions_answered', 'id': request_id, 'answers': answers}
+    yield result(answers_text(questions, answers))
+
+
 
 async def request_download(db, jobs, conversation: Conversation, call: dict) -> AsyncIterator[dict]:
     """Ask the user (via a chat popup) to approve a download, run it, and report back.
@@ -648,13 +764,15 @@ async def _plugin_tool(plugin_manager, tool, call) -> AsyncIterator[dict]:
 
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
                    web_search: bool = False, jobs=None, exporter=None, plugin_manager=None,
-                   creator=None, documents=None, doc_session=None) -> AsyncIterator[dict]:
+                   creator=None, documents=None, doc_session=None, interactive: bool = False) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
     table is shown, at the end of the turn, as in the marimo notebook.
     ``documents(title, content, results)`` creates a shared document (create_document);
     ``doc_session`` runs the suggest_* tools when nembot is tagged in a document.
+    ``interactive`` (a person is watching the chat) adds the questionnaire tool; unattended runs
+    such as evals leave it out so they never wait for answers.
     """
     provider = providers[model.provider]
     web_search = web_search and getattr(provider, 'web_search', True)  # e.g. Ollama has no web search
@@ -664,6 +782,8 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     history.append({'role': 'user', 'text': text, 'context': await asyncio.to_thread(data_status, db)})
     latest_table = None
     system, tools = mode_setup(conversation.mode, model, web_search, plugin_manager)
+    if interactive and conversation.mode in ('analyst', 'creator'):
+        system, tools = system + QUESTIONNAIRE_NOTE, tools + [QUESTIONNAIRE]
     try:
         for _ in range(MAX_ROUNDS):
             turn = None
@@ -701,6 +821,14 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                                             'image': event.get('image'), 'is_error': event['is_error']})
                         elif event['type'] == 'table':
                             latest_table = event
+                        else:
+                            yield event
+                    continue
+                if call['name'] == 'questionnaire' and interactive:
+                    async for event in questionnaire(conversation, call):
+                        if event['type'] == 'result':
+                            results.append({'id': call['id'], 'name': call['name'], 'text': event['text'],
+                                            'image': None, 'is_error': event['is_error']})
                         else:
                             yield event
                     continue

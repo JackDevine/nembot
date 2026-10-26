@@ -57,10 +57,12 @@ def sources(content: list) -> tuple[str, list[dict]]:
     return ('cited', list(cited.values())) if cited else ('consulted', list(consulted.values()))
 
 
-def request_options(model_id: str) -> dict:
+def request_options(model_id: str, effort: str | None = None) -> dict:
+    """``effort`` is the level picked in the model picker (the models API lists which each model takes)."""
     options, betas = {}, []
+    if effort or model_id in _ADAPTIVE:
+        options['output_config'] = {'effort': effort or 'medium'}
     if model_id in _ADAPTIVE:
-        options['output_config'] = {'effort': 'medium'}
         if model_id in _THINKING_UPDATES:
             # Progress notes between tool calls arrive as thinking blocks.
             options['thinking'] = {'type': 'adaptive', 'display': 'updates'}
@@ -145,7 +147,8 @@ class ClaudeProvider:
         return ''.join(b.text for b in response.content if b.type == 'text')
 
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
-                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+                      system: str | None = None, tools: list[dict] | None = None,
+                      effort: str | None = None) -> AsyncIterator[dict]:
         tools = [{**tool, 'eager_input_streaming': True} for tool in (TOOLS if tools is None else tools)]
         if web_search:
             tools += web_tools(model.id)
@@ -159,7 +162,7 @@ class ClaudeProvider:
                     tools=tools,
                     messages=render(history, model),
                     cache_control={'type': 'ephemeral'},
-                    **request_options(model.id),
+                    **request_options(model.id, effort),
                 ) as stream:
                     previous, started = None, None
                     async for event in stream:

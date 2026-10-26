@@ -21,13 +21,33 @@ class ModelInfo:
     context: int | None = None
     price_in: float | None = None   # USD per million input tokens
     price_out: float | None = None
+    efforts: tuple = ()             # reasoning levels the model takes, lowest first ('off'/'on' for Ollama)
+    default_effort: str | None = None  # the level nembot uses unless the user picks another
+
+
+EFFORT_ORDER = ['none', 'off', 'minimal', 'low', 'medium', 'high', 'on', 'xhigh', 'max']
+
+
+def efforts(levels) -> tuple:
+    """Known reasoning levels in order, lowest first."""
+    levels = {str(level) for level in levels or ()}
+    return tuple(level for level in EFFORT_ORDER if level in levels)
+
+
+def default_effort(levels: tuple) -> str | None:
+    """nembot's default: medium, as for Claude, else the nearest level (high before low), else on."""
+    return next((level for level in ('medium', 'high', 'low', 'on') if level in levels), levels[0] if levels else None)
 
 
 async def claude_models(client: anthropic.AsyncAnthropic) -> list[ModelInfo]:
     """Claude models from the Anthropic models API. Every one accepts images and tools."""
-    listed = [m async for m in client.models.list(limit=100)]
-    return [ModelInfo(f'claude:{m.id}', 'claude', m.id, m.display_name, True, True, True,
-                      getattr(m, 'max_input_tokens', None)) for m in listed]
+    models = []
+    async for m in client.models.list(limit=100):
+        capability = ((m.to_dict().get('capabilities') or {}).get('effort') or {})
+        levels = efforts(level for level, v in capability.items() if isinstance(v, dict) and v.get('supported'))
+        models.append(ModelInfo(f'claude:{m.id}', 'claude', m.id, m.display_name, True, True, True,
+                                getattr(m, 'max_input_tokens', None), efforts=levels, default_effort=default_effort(levels)))
+    return models
 
 
 class Catalog:

@@ -13,7 +13,7 @@ import re
 
 import httpx2 as httpx
 
-from .models import ModelInfo
+from .models import ModelInfo, default_effort, efforts
 
 
 @dataclass(frozen=True)
@@ -113,10 +113,13 @@ def _openrouter_models(data: list, available: bool) -> list[ModelInfo]:
         if 'text' not in (m.get('architecture', {}).get('output_modalities') or ['text']):
             continue  # image/audio generators can't drive a chat
         pricing = m.get('pricing') or {}
+        reasoning = m.get('reasoning') if isinstance(m.get('reasoning'), dict) else {}
+        levels = efforts(reasoning.get('supported_efforts'))
         models.append(ModelInfo(
             f"openrouter:{m['id']}", 'openrouter', m['id'], m.get('name') or m['id'],
             'image' in inputs, 'tools' in (m.get('supported_parameters') or []), available,
             m.get('context_length'), _per_million(pricing.get('prompt')), _per_million(pricing.get('completion')),
+            efforts=levels, default_effort=default_effort(levels),
         ))
     return models
 
@@ -139,7 +142,8 @@ async def _ollama_models(client, base: str, available: bool) -> list[ModelInfo]:
         return name, info.get('capabilities') or [], context
 
     shown = await asyncio.gather(*(show(name) for name in names))
-    return [ModelInfo(f'ollama:{name}', 'ollama', name, name, 'vision' in caps, 'tools' in caps, available, context)
+    return [ModelInfo(f'ollama:{name}', 'ollama', name, name, 'vision' in caps, 'tools' in caps, available, context,
+                      efforts=('off', 'on') if 'thinking' in caps else (), default_effort='on' if 'thinking' in caps else None)
             for name, caps, context in shown if 'embedding' not in caps]
 
 

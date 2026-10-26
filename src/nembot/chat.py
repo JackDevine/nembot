@@ -730,6 +730,17 @@ async def request_download(db, jobs, conversation: Conversation, call: dict) -> 
         yield result(f'The download of {table} ({months}) failed: {job.error}', True)
 
 
+def chosen_effort(model: ModelInfo, efforts: dict | None) -> str | None:
+    """The reasoning level picked for ``model`` in the model picker, if it takes that level, else nembot's default."""
+    picked = (efforts or {}).get(model.ref)
+    return picked if picked in model.efforts else model.default_effort
+
+
+def model_event(model: ModelInfo, efforts: dict | None) -> dict:
+    """A model as the UI shows it on a reply, with the reasoning level it ran at."""
+    return {**model_public(model), 'effort': chosen_effort(model, efforts)}
+
+
 def mode_setup(mode: str, model: ModelInfo, web_search: bool, plugin_manager=None) -> tuple[str, list[dict]]:
     """System prompt and tools for a conversation mode.
 
@@ -764,7 +775,8 @@ async def _plugin_tool(plugin_manager, tool, call) -> AsyncIterator[dict]:
 
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
                    web_search: bool = False, jobs=None, exporter=None, plugin_manager=None,
-                   creator=None, documents=None, doc_session=None, interactive: bool = False) -> AsyncIterator[dict]:
+                   creator=None, documents=None, doc_session=None, interactive: bool = False,
+                   efforts: dict | None = None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -773,6 +785,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     ``doc_session`` runs the suggest_* tools when nembot is tagged in a document.
     ``interactive`` (a person is watching the chat) adds the questionnaire tool; unattended runs
     such as evals leave it out so they never wait for answers.
+    ``efforts`` maps model refs to the reasoning level picked for them (see chosen_effort).
     """
     provider = providers[model.provider]
     web_search = web_search and getattr(provider, 'web_search', True)  # e.g. Ollama has no web search
@@ -782,13 +795,15 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     history.append({'role': 'user', 'text': text, 'context': await asyncio.to_thread(data_status, db)})
     latest_table = None
     system, tools = mode_setup(conversation.mode, model, web_search, plugin_manager)
+    reasoning = {'effort': chosen_effort(model, efforts)} if model.efforts else {}
     if interactive and conversation.mode in ('analyst', 'creator'):
         system, tools = system + QUESTIONNAIRE_NOTE, tools + [QUESTIONNAIRE]
     try:
         for _ in range(MAX_ROUNDS):
             turn = None
             partial = []  # this round's text so far, kept if the user stops the reply
-            async for item in provider.respond(model, history, web_search=web_search, system=system, tools=tools):
+            async for item in provider.respond(model, history, web_search=web_search, system=system, tools=tools,
+                                               **reasoning):
                 if item.get('role') == 'assistant':
                     turn = item
                 else:
@@ -990,7 +1005,7 @@ async def run_compare(providers: dict, db, conversation: Conversation, text: str
             await queue.put({'type': 'branch_done', 'branch': index})
             await queue.put(None)
 
-    yield {'type': 'compare', 'models': [model_public(m) for m in models]}
+    yield {'type': 'compare', 'models': [model_event(m, options.get('efforts')) for m in models]}
     tasks = [asyncio.create_task(drive(i)) for i in range(len(models))]
     conversation.running.update({i: (task, branches[i]) for i, task in enumerate(tasks)})
     try:

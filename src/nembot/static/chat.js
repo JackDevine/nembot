@@ -106,10 +106,25 @@ function modelBadges(m) {
   return meta;
 }
 
+// Reasoning levels: each model lists the ones it takes (lowest first). The level you pick for a model
+// in the picker is remembered for it; otherwise nembot's default (medium, or the nearest) applies.
+const EFFORT_LABELS = { none: 'off', off: 'off', minimal: 'minimal', low: 'low', medium: 'medium', high: 'high',
+  on: 'on', xhigh: 'x-high', max: 'max' };
+function savedEfforts() { try { return JSON.parse(localStorage.getItem('efforts') || '{}'); } catch { return {}; } }
+function effortFor(m) {
+  const saved = savedEfforts()[m.ref];
+  return m.efforts?.includes(saved) ? saved : m.default_effort || null;
+}
+function setEffort(m, level) {
+  const saved = savedEfforts(); saved[m.ref] = level;
+  localStorage.setItem('efforts', JSON.stringify(saved));
+}
+function effortSuffix(m, level = effortFor(m)) { return level ? ` · ${EFFORT_LABELS[level] || level}` : ''; }
+
 function setModel(m) {
   currentModel = m;
   localStorage.setItem('model', m.ref);
-  modelButton.textContent = `${providerLabel(m.provider)} · ${m.name}`;
+  modelButton.textContent = `${providerLabel(m.provider)} · ${m.name}${effortSuffix(m)}`;
   modelButton.title = `${m.ref} — ${m.vision ? 'text + image input' : 'text-only input: cannot see plots'}`;
   setCompareModels(compareModels.filter(c => c.ref !== m.ref));
 }
@@ -125,7 +140,7 @@ function drawCompareChips() {
   compareChips.replaceChildren();
   compareChips.hidden = chatMode === 'creator' || !compareModels.length;
   for (const m of compareModels) {
-    const chip = el('span', 'compare-chip', `vs ${m.name}`);
+    const chip = el('span', 'compare-chip', `vs ${m.name}${effortSuffix(m)}`);
     chip.title = `${m.ref} also answers each message; the replies appear side by side`;
     const remove = el('button', '', '×');
     remove.type = 'button';
@@ -139,6 +154,32 @@ function drawCompareChips() {
 // The models that answer the next message: the chat's model first.
 function turnModels(pane) {
   return [currentModel, ...(pane.mode === 'creator' ? [] : compareModels)].filter(Boolean).map(m => m.ref);
+}
+function turnEfforts(pane) {
+  const levels = {};
+  for (const m of [currentModel, ...(pane.mode === 'creator' ? [] : compareModels)]) {
+    if (m && effortFor(m)) levels[m.ref] = effortFor(m);
+  }
+  return levels;
+}
+
+// Level buttons in a picker row: pick the model at that level (or, for a compared model, just its level).
+function effortButtons(m, compared) {
+  const box = el('span', 'effort-pick');
+  box.title = 'Reasoning level: how much the model thinks before answering. Higher is slower and costs more.';
+  const current = effortFor(m);
+  for (const level of m.efforts) {
+    const b = el('button', level === current ? 'active' : '', EFFORT_LABELS[level] || level);
+    b.type = 'button';
+    b.onclick = e => {
+      e.stopPropagation();
+      setEffort(m, level);
+      if (compared) { drawCompareChips(); drawModels(); return; }
+      setModel(m); picker.classList.remove('open'); input.focus();
+    };
+    box.append(b);
+  }
+  return box;
 }
 
 function drawModels() {
@@ -156,7 +197,8 @@ function drawModels() {
         + (compared ? ' compared' : ''));
       row.title = !m.available ? 'This service is not connected. Connect it on the Settings page.'
         : !m.tools ? 'This model does not support tool calling, so it cannot query the database.' : m.id;
-      row.append(el('span', '', m.name), modelBadges(m));
+      row.append(el('span', 'model-name', m.name), modelBadges(m));
+      if (usable && m.efforts?.length) row.append(effortButtons(m, compared));
       if (usable) {
         row.onclick = () => { setModel(m); picker.classList.remove('open'); input.focus(); };
         if (chatMode !== 'creator' && m.ref !== currentModel?.ref) {
@@ -528,7 +570,7 @@ function compareColumns(turn, reply, pane, text, replay, models) {
       } catch (err) { alert(err.message); }
       keep.disabled = false;
     };
-    head.append(el('b', '', `${providerLabel(m.provider)} · ${m.name}`), el('span', 'kept-label', '✓ continuing from this'), stop, keep);
+    head.append(el('b', '', `${providerLabel(m.provider)} · ${m.name}${effortSuffix(m, m.effort)}`), el('span', 'kept-label', '✓ continuing from this'), stop, keep);
     const body = el('div', 'assistant');
     col.append(head, body);
     grid.append(col);
@@ -595,7 +637,7 @@ function replyRenderer(reply, pane, text, replay) {
         scroll();
         break;
       case 'model':
-        reply.prepend(el('div', 'via', `${providerLabel(event.model.provider)} · ${event.model.name}`));
+        reply.prepend(el('div', 'via', `${providerLabel(event.model.provider)} · ${event.model.name}${effortSuffix(event.model, event.model.effort)}`));
         break;
       case 'tool':
       case 'tool_running':
@@ -756,7 +798,7 @@ async function ask(text) {
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conversation: pane.id, message: text, models: turnModels(pane),
+      body: JSON.stringify({ conversation: pane.id, message: text, models: turnModels(pane), efforts: turnEfforts(pane),
         web_search: pane.webSearch, mode: pane.mode }),
     });
     if (!response.ok) {

@@ -23,7 +23,7 @@ from . import chats, client, credentials, docs, downloads, explorer, live, plugi
 from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
-from .chat import MAX_COMPARE, Conversation, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
+from .chat import MAX_COMPARE, Conversation, model_event, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
 from .connections import Connections
 from .presets import PRESETS
 from .models import public
@@ -235,6 +235,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         if len(chosen) > 1 and mode == 'creator':  # the models would overwrite each other's plugin drafts
             return JSONResponse({'error': 'Creator mode works with one model at a time'}, status_code=400)
         web_search = bool(body.get('web_search'))
+        efforts = {str(k): str(v) for k, v in body.get('efforts').items()} if isinstance(body.get('efforts'), dict) else {}
         saved = None
         if conversation_id not in conversations:  # a saved chat reopened after a restart
             saved = await asyncio.to_thread(chats.get, db, conversation_id)
@@ -270,12 +271,12 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
                 conversation.branches = None  # an earlier compare turn's choice is final now
                 options = dict(web_search=web_search, jobs=jobs, exporter=exporter, plugin_manager=plugin_manager,
                                creator=creator, documents=lambda *a: documents(*a, conversation_id),
-                               interactive=True)
+                               interactive=True, efforts=efforts)
                 if len(chosen) > 1:
                     turn_events = run_compare(providers, db, conversation, text, chosen, describe_error=_api_error,
                                               **options)
                 else:
-                    event = {'type': 'model', 'model': public(model)}
+                    event = {'type': 'model', 'model': model_event(model, efforts)}
                     shown.append(event)
                     yield f'data: {json.dumps(event)}\n\n'
                     turn_events = run_single(providers, db, conversation, text, model, describe_error=_api_error,

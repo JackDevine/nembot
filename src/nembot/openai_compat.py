@@ -145,7 +145,8 @@ class OpenAICompatProvider:
         return (response.choices[0].message.content or '') if response.choices else ''
 
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
-                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+                      system: str | None = None, tools: list[dict] | None = None,
+                      effort: str | None = None) -> AsyncIterator[dict]:
         tools = functions(TOOLS if tools is None else tools)
         web_search = web_search and self.preset.web_search
         stream = await self.client.chat.completions.create(
@@ -154,6 +155,9 @@ class OpenAICompatProvider:
             tools=tools + [WEB_SEARCH] if web_search else tools,
             stream=True,
             stream_options={'include_usage': True},
+            # OpenRouter's catalogue lists each model's levels; without one a model uses its own default
+            # (Kimi K3.1's is max).
+            **({'extra_body': {'reasoning': {'effort': effort}}} if effort and self.preset.name == 'openrouter' else {}),
         )
         text, calls, reasoning, sources = [], {}, [], {}
         finish, usage, in_text = None, None, False

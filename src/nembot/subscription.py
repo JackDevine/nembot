@@ -37,7 +37,7 @@ from typing import AsyncIterator
 import claude_agent_sdk as sdk
 
 from .chat import TOOLS, VISION_PLOT_NOTE, earlier_reply_label, system_prompt, text_from_blocks
-from .models import ModelInfo
+from .models import ModelInfo, default_effort, efforts
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +90,10 @@ async def list_models() -> tuple[list[ModelInfo], str | None]:
             continue
         seen.add(model_id)
         name = m.get('displayName') or model_id
+        levels = efforts(m.get('supportedEffortLevels')) if m.get('supportsEffort') else ()
         models.append(ModelInfo(f'subscription:{model_id}', 'subscription', model_id,
-                                name if name.startswith('Claude') else f'Claude {name}', True, True, True))
+                                name if name.startswith('Claude') else f'Claude {name}', True, True, True,
+                                efforts=levels, default_effort=default_effort(levels)))
     return models, None
 
 
@@ -232,7 +234,7 @@ class SubscriptionProvider:
             await session.close()
 
     async def _start(self, model: ModelInfo, history: list, web_search: bool, system: str | None,
-                     tools: list[dict]) -> Session:
+                     tools: list[dict], effort: str | None = None) -> Session:
         holder = {}
 
         def handler(name):
@@ -252,7 +254,7 @@ class SubscriptionProvider:
             cwd = workdir.name
         system = (system or system_prompt(vision=True, web_search=web_search)) + TOOL_NAMES_NOTE
         options = _options(model.id, system, mcp_tools,
-                           web_search, cwd, persist=bool(self.session_dir), effort='medium',
+                           web_search, cwd, persist=bool(self.session_dir), effort=effort or 'medium',
                            thinking={'type': 'adaptive', 'display': 'summarized'}, **extra)
         # A resumed session already holds the chat; it only needs the new message.
         prompt = render_prompt(history[-1:] if saved else history, model)
@@ -271,7 +273,8 @@ class SubscriptionProvider:
         return session
 
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
-                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+                      system: str | None = None, tools: list[dict] | None = None,
+                      effort: str | None = None) -> AsyncIterator[dict]:
         key = id(history)
         session = self._sessions.get(key)
         last = history[-1]
@@ -286,7 +289,7 @@ class SubscriptionProvider:
             if session is not None:  # a leftover from an abandoned turn
                 await self.close_turn(history)
             session = self._sessions[key] = await self._start(model, history, web_search, system,
-                                                              TOOLS if tools is None else tools)
+                                                              TOOLS if tools is None else tools, effort)
         handed_off = False
         try:
             async for item in self._stream(session, model, bool(self.session_dir)):

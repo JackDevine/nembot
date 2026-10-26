@@ -141,12 +141,20 @@ button:disabled { opacity: .5; cursor: default; }
 #picker input { margin: 8px 12px; padding: 6px 8px; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 #picker .list { overflow-y: auto; padding-bottom: 6px; }
 #picker h3 { font-size: 12px; text-transform: uppercase; color: var(--muted); margin: 8px 12px 4px; }
-.model { display: flex; justify-content: space-between; gap: 8px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
+.model { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 5px 12px; cursor: pointer; font-size: 13px; }
 .model:hover, .model.current { background: var(--bg); }
 .model.disabled { opacity: .45; cursor: not-allowed; }
 .model .meta { display: flex; gap: 4px; flex-shrink: 0; }
 .model.compared { box-shadow: inset 3px 0 var(--accent); }
 .model .compare-add { font-size: 11px; padding: 0 6px; flex-shrink: 0; visibility: hidden; }
+.model .model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Reasoning level buttons: shown on hover and on the current model, like "+ compare". */
+.effort-pick { display: none; flex-shrink: 0; border: 1px solid var(--border); border-radius: 999px; overflow: hidden; }
+.model:hover .effort-pick, .model.current .effort-pick, .model.compared .effort-pick { display: inline-flex; }
+.effort-pick button { border: none; border-radius: 0; padding: 0 7px; font-size: 11px; line-height: 18px; background: transparent; color: var(--muted); }
+.effort-pick button + button { border-left: 1px solid var(--border); }
+.effort-pick button:hover { color: var(--fg); background: var(--bg); }
+.effort-pick button.active { background: var(--accent); color: white; }
 .model:hover .compare-add, .model.compared .compare-add { visibility: visible; }
 
 /* Compare turns: several models answer one message side by side */

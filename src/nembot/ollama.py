@@ -87,9 +87,12 @@ class OllamaProvider:
             return response.json().get('message', {}).get('content', '')
 
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
-                      system: str | None = None, tools: list[dict] | None = None) -> AsyncIterator[dict]:
+                      system: str | None = None, tools: list[dict] | None = None,
+                      effort: str | None = None) -> AsyncIterator[dict]:
         client, body = self._chat(model, render(history, model, False, system),
-                                        functions(TOOLS if tools is None else tools), True)
+                                  functions(TOOLS if tools is None else tools), True)
+        if effort in ('on', 'off'):  # thinking models only
+            body['think'] = effort == 'on'
         text, calls, in_text, started, final = [], [], False, None, {}
         async with client, client.stream('POST', f'{self._root()}/api/chat', json=body) as response:
             if response.status_code >= 400:

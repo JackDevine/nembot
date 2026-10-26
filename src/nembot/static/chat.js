@@ -6,6 +6,7 @@ const input = document.getElementById('input');
 const send = document.getElementById('send');
 const stopButton = document.getElementById('stop');
 const chatStats = document.getElementById('chat-stats');
+const searchNote = document.getElementById('search-note');
 let conversation = null;    // the chat on screen
 let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one mode
 // Each chat shown this session has its own pane in the log, so a reply keeps streaming into
@@ -51,6 +52,7 @@ function showPane(id) {
   conversation = id;
   chatMode = pane.mode;
   webSearch.checked = pane.webSearch;
+  drawSearchNote();
   for (const other of [...panes.values()]) {
     other.el.hidden = other !== pane;
     if (other !== pane && !other.busy) { other.el.remove(); panes.delete(other.id); }
@@ -83,7 +85,13 @@ document.querySelectorAll('.mode-switch button').forEach(button => {
 // TODO: replace this toggle once there's a UI for choosing which tools are available.
 const webSearch = document.getElementById('web-search');
 webSearch.checked = localStorage.getItem('webSearch') !== 'off';
-webSearch.onchange = () => localStorage.setItem('webSearch', webSearch.checked ? 'on' : 'off');
+webSearch.onchange = () => { localStorage.setItem('webSearch', webSearch.checked ? 'on' : 'off'); drawSearchNote(); };
+
+// OpenRouter doesn't stream while its web search tool is on: say so while it applies to the next message.
+function drawSearchNote() {
+  const answering = [currentModel, ...(chatMode === 'creator' ? [] : compareModels)].filter(Boolean);
+  searchNote.hidden = !(webSearch.checked && answering.some(m => m.provider === 'openrouter'));
+}
 
 // ---- Model picker ----
 const picker = document.getElementById('picker');
@@ -143,6 +151,7 @@ function setCompareModels(list) {
 
 // "vs <model> ×" chips beside the model button. Creator mode always uses one model.
 function drawCompareChips() {
+  drawSearchNote();
   compareChips.replaceChildren();
   compareChips.hidden = chatMode === 'creator' || !compareModels.length;
   for (const m of compareModels) {
@@ -639,7 +648,10 @@ function replyRenderer(reply, pane, text, replay) {
   let segment = null, markdown = '';
   const scroll = () => { if (shown() && followLog) log.scrollTop = log.scrollHeight; };
   const place = node => { status.parentNode === reply ? reply.insertBefore(node, status) : reply.append(node); scroll(); };
-  // Reasoning streams into an open dropdown, which folds itself once the model moves on.
+  // Reasoning streams into an open dropdown, which folds itself once the model moves on. Its time counts
+  // from the event before it (the reply starting, or the last tool event), because some providers send
+  // reasoning in one piece at the end (OpenRouter with web search on).
+  let lastEventAt = performance.now();
   function endSegment() {
     if (segment?.reasoning) {
       const seconds = segment.started ? Math.round((performance.now() - segment.started) / 1000) : null;
@@ -651,6 +663,7 @@ function replyRenderer(reply, pane, text, replay) {
   }
 
   function handle(event) {
+    if (event.type !== 'progress' && event.type !== 'usage') lastEventAt = performance.now();
     switch (event.type) {
       case 'block': endSegment(); break;
       case 'text':
@@ -665,7 +678,7 @@ function replyRenderer(reply, pane, text, replay) {
           segment = el('details', 'reasoning streaming');
           segment.reasoning = true;
           segment.open = true;
-          segment.started = replay ? null : performance.now();
+          segment.started = replay ? null : lastEventAt;
           segment.summary = el('summary', '', 'Thinking…');
           segment.body = el('div', 'progress');
           segment.append(segment.summary, segment.body);

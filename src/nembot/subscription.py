@@ -12,15 +12,24 @@ nembot's own turn loop (``chat.run_turn``) in charge:
   results in history are handed to the waiting handlers and the session continues.
 - ``close_turn`` ends a session that ``run_turn`` abandoned (stop, error, round limit).
 
-Claude Code's own tools are off (only WebSearch/WebFetch, with web search on), it
-loads no user settings, and sessions aren't saved, so these chats don't appear in
-Claude Code's history. Each session starts fresh: earlier turns of the chat are
-sent as a transcript, since the SDK can't replay other providers' turns.
+Claude Code's own tools are off (only WebSearch/WebFetch, with web search on) and it
+loads no user settings. Sessions are saved under ``session_dir`` (Claude Code keeps
+them in ~/.claude/projects/<that directory>, out of the way of other projects):
+
+- A turn that follows this model's own finished turn resumes that turn's session, so
+  Claude sees its real earlier tool calls, results and plots. Each resume forks a new
+  session, leaving the old one intact; that way a failed or stopped turn, which
+  ``run_turn`` drops from history, never leaks into the next one. The final turn
+  records ``raw['subscription'] = {'session', 'parent'}``.
+- Otherwise (first message, another model replied last, a stopped turn, a session
+  Claude Code has since cleaned up) the session starts fresh with the chat so far
+  as a transcript, since the SDK can't replay other providers' turns.
 """
 import asyncio
 from dataclasses import dataclass, field
 import json
 import logging
+import os
 import tempfile
 import time
 from typing import AsyncIterator
@@ -37,14 +46,18 @@ PREFIX = f'mcp__{SERVER}__'
 WEB_TOOLS = ['WebSearch', 'WebFetch']
 _UI_NAMES = {'WebSearch': 'web_search', 'WebFetch': 'web_fetch'}  # as the Claude API provider shows them
 MAX_RESULT_CHARS = 200_000  # keep tool results inline (Claude Code otherwise saves big ones to a file)
-TOOL_TIMEOUT_MS = str(24 * 3600 * 1000)  # request_download waits for the user's approval and the download
+TOOL_TIMEOUT_MS = str(24 * 3600 * 1000)
+# The prompts name tools plainly (query_mms); Claude Code exposes them with an MCP prefix.
+TOOL_NAMES_NOTE = (f'\n\nIn this session the tools named above are called with the prefix `{PREFIX}`, '
+                   f'for example `{PREFIX}query_mms`.')  # request_download waits for the user's approval and the download
 
 
 class PlanError(RuntimeError):
     """A problem with the Claude plan session, worded for the chat."""
 
 
-def _options(model_id: str, system: str, tools: list, web_search: bool, workdir: str, **extra) -> sdk.ClaudeAgentOptions:
+def _options(model_id: str, system: str, tools: list, web_search: bool, workdir: str, persist: bool = False,
+             **extra) -> sdk.ClaudeAgentOptions:
     return sdk.ClaudeAgentOptions(
         model=model_id,
         system_prompt=system,
@@ -55,7 +68,7 @@ def _options(model_id: str, system: str, tools: list, web_search: bool, workdir:
         setting_sources=[],
         cwd=workdir,
         include_partial_messages=True,
-        extra_args={'no-session-persistence': None},
+        extra_args={} if persist else {'no-session-persistence': None},
         env={'MCP_TOOL_TIMEOUT': TOOL_TIMEOUT_MS},
         **extra,
     )
@@ -120,7 +133,8 @@ class Session:
     """One user turn's SDK session, alive while nembot runs the tools it asked for."""
     client: object
     messages: AsyncIterator
-    workdir: tempfile.TemporaryDirectory
+    workdir: tempfile.TemporaryDirectory | None   # a scratch cwd when sessions aren't saved
+    parent: str | None = None                     # the session this one resumed (forked) from
     waiting: list = field(default_factory=list)   # (name, input, future): handlers awaiting a result
     ready: list = field(default_factory=list)     # (name, input, result): results no handler has taken yet
     asked: list = field(default_factory=list)     # the tool calls of the turn handed to run_turn
@@ -152,7 +166,8 @@ class Session:
             await self.client.disconnect()
         except Exception:
             log.debug('closing the plan session failed', exc_info=True)
-        self.workdir.cleanup()
+        if self.workdir is not None:
+            self.workdir.cleanup()
 
 
 def _usage_event(start: dict, delta: dict, model: str, started: float | None, finished: float, searches: int) -> dict:
@@ -165,9 +180,39 @@ def _usage_event(start: dict, delta: dict, model: str, started: float | None, fi
 
 
 class SubscriptionProvider:
-    def __init__(self, client_factory=sdk.ClaudeSDKClient):
+    def __init__(self, client_factory=sdk.ClaudeSDKClient, session_dir=None):
         self._client = client_factory
         self._sessions: dict[int, Session] = {}  # by id() of the conversation's history list
+        self.session_dir = str(session_dir) if session_dir else None  # None: no saved sessions, no resume
+
+    def _resumable(self, history: list, model: ModelInfo) -> dict | None:
+        """The saved session of the turn before the new message, if this model wrote it and it still exists."""
+        if not self.session_dir or len(history) < 2:
+            return None
+        previous = history[-2]
+        saved = previous.get('raw', {}).get('subscription') if previous['role'] == 'assistant' else None
+        if not saved or previous['model'] != model.ref:
+            return None
+        try:
+            return saved if sdk.get_session_info(saved['session'], directory=self.session_dir) else None
+        except Exception:
+            log.debug('looking up a saved plan session failed', exc_info=True)
+            return None
+
+    def forget_chat(self, history: list) -> None:
+        """Delete the saved sessions a deleted chat refers to."""
+        for entry in history:
+            saved = entry.get('raw', {}).get('subscription') if entry['role'] == 'assistant' else None
+            if saved:
+                self._forget(saved.get('session'))
+                self._forget(saved.get('parent'))
+
+    def _forget(self, session_id: str | None) -> None:
+        if session_id and self.session_dir:
+            try:
+                sdk.delete_session(session_id, directory=self.session_dir)
+            except Exception:
+                log.debug('deleting an old plan session failed', exc_info=True)
 
     async def complete(self, model: ModelInfo, prompt: str) -> str:
         """A short one-off answer (e.g. a chat title), at low effort."""
@@ -197,18 +242,32 @@ class SubscriptionProvider:
 
         mcp_tools = [sdk.SdkMcpTool(t['name'], t['description'], t['input_schema'], handler(t['name']),
                                     sdk.ToolAnnotations(maxResultSizeChars=MAX_RESULT_CHARS)) for t in tools]
-        workdir = tempfile.TemporaryDirectory(prefix='nembot-plan-')
-        options = _options(model.id, system or system_prompt(vision=True, web_search=web_search), mcp_tools,
-                           web_search, workdir.name, effort='medium',
-                           thinking={'type': 'adaptive', 'display': 'summarized'})
+        saved = self._resumable(history, model)
+        extra = {'resume': saved['session'], 'fork_session': True} if saved else {}
+        if self.session_dir:
+            os.makedirs(self.session_dir, exist_ok=True)
+            workdir, cwd = None, self.session_dir
+        else:
+            workdir = tempfile.TemporaryDirectory(prefix='nembot-plan-')
+            cwd = workdir.name
+        system = (system or system_prompt(vision=True, web_search=web_search)) + TOOL_NAMES_NOTE
+        options = _options(model.id, system, mcp_tools,
+                           web_search, cwd, persist=bool(self.session_dir), effort='medium',
+                           thinking={'type': 'adaptive', 'display': 'summarized'}, **extra)
+        # A resumed session already holds the chat; it only needs the new message.
+        prompt = render_prompt(history[-1:] if saved else history, model)
         client = self._client(options)
         try:
             await client.connect()
-            await client.query(render_prompt(history, model))
+            await client.query(prompt)
         except BaseException:
-            workdir.cleanup()
+            if workdir is not None:
+                workdir.cleanup()
             raise
-        session = holder['session'] = Session(client, client.receive_messages().__aiter__(), workdir)
+        session = holder['session'] = Session(client, client.receive_messages().__aiter__(), workdir,
+                                              saved and saved['session'])
+        if saved:  # the session before the one resumed is no longer needed (and no compare turn still reads it)
+            self._forget(saved.get('parent'))
         return session
 
     async def respond(self, model: ModelInfo, history: list, web_search: bool = False, *,
@@ -230,7 +289,7 @@ class SubscriptionProvider:
                                                               TOOLS if tools is None else tools)
         handed_off = False
         try:
-            async for item in self._stream(session, model):
+            async for item in self._stream(session, model, bool(self.session_dir)):
                 if item.get('role') == 'assistant' and item['tool_calls']:
                     session.asked = item['tool_calls']
                     handed_off = True
@@ -239,7 +298,7 @@ class SubscriptionProvider:
             if not handed_off:
                 await self.close_turn(history)
 
-    async def _stream(self, session: Session, model: ModelInfo) -> AsyncIterator[dict]:
+    async def _stream(self, session: Session, model: ModelInfo, saved: bool) -> AsyncIterator[dict]:
         """Stream the session until it calls nembot tools or finishes; yield events, then the turn."""
         blocks: list[tuple[str, str]] = []  # (kind, text) of this turn, across web-search rounds
         calls: list[dict] = []
@@ -297,7 +356,10 @@ class SubscriptionProvider:
             elif isinstance(message, sdk.ResultMessage):
                 if message.is_error and message.subtype != 'success':
                     raise PlanError('; '.join(message.errors or []) or f'Claude plan session failed ({message.subtype}).')
-                yield self._turn(model, blocks, [], 'end')
+                turn = self._turn(model, blocks, [], 'end')
+                if saved and message.session_id:
+                    turn['raw'] = {'subscription': {'session': message.session_id, 'parent': session.parent}}
+                yield turn
                 return
         raise PlanError('The Claude Code session ended unexpectedly.')
 

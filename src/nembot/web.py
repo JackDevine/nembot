@@ -104,7 +104,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     claude = anthropic.AsyncAnthropic()
     catalog = Catalog(claude, subscription.list_models)
     providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider(),
-                 'subscription': subscription.SubscriptionProvider()}
+                 'subscription': subscription.SubscriptionProvider(
+                     session_dir=Path(database).absolute().parent / 'claude-sessions')}
     conversations: dict[str, Conversation] = {}
 
     async def index(request: Request):
@@ -309,6 +310,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             if conversation and conversation.lock.locked():
                 return JSONResponse({'error': 'wait for the reply to finish'}, status_code=409)
             conversations.pop(chat_id, None)
+            if saved := await asyncio.to_thread(chats.get, db, chat_id):  # its Claude plan sessions go too
+                await asyncio.to_thread(providers['subscription'].forget_chat, saved['history'])
             await asyncio.to_thread(chats.delete, db, chat_id)
             return JSONResponse({'ok': True})
         if request.method == 'PATCH':

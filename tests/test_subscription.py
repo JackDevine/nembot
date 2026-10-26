@@ -63,7 +63,7 @@ class FakeClaudeCode:
         yield assistant(sdk.TextBlock(answer))
         yield stream('message_stop')
         yield sdk.ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False, num_turns=2,
-                                session_id='s')
+                                session_id=f'session-{FakeClaudeCode.instances.index(self) + 1}')
 
 
 def fake_server(name, tools):
@@ -142,6 +142,80 @@ class PlanTurns(DatabaseCase):
             self.turn(provider, conversation)
         self.assertEqual(conversation.history, [])
         self.assertTrue(FakeClaudeCode.instances[0].disconnected)
+
+
+class ResumedSessions(PlanTurns):
+    """With a session directory, a turn after this model's own turn resumes (forks) that turn's session."""
+
+    def setUp(self):
+        super().setUp()
+        self.saved = {}  # session id -> exists on disk
+        self.deleted = []
+        info = patch('nembot.subscription.sdk.get_session_info',
+                     lambda sid, directory=None: object() if self.saved.get(sid, True) else None)
+        delete = patch('nembot.subscription.sdk.delete_session', lambda sid, directory=None: self.deleted.append(sid))
+        for p in (info, delete):
+            p.start()
+            self.addCleanup(p.stop)
+        self.provider = subscription.SubscriptionProvider(FakeClaudeCode, session_dir=self.directory.name)
+
+    def test_follow_up_resumes_the_previous_session_with_only_the_new_message(self):
+        conversation = Conversation()
+        self.turn(self.provider, conversation, 'first')
+        first = FakeClaudeCode.instances[0]
+        self.assertIsNone(first.options.resume)
+        self.assertNotIn('no-session-persistence', first.options.extra_args)
+        self.assertEqual(first.options.cwd, self.directory.name)
+        self.assertEqual(conversation.history[-1]['raw'], {'subscription': {'session': 'session-1', 'parent': None}})
+
+        self.turn(self.provider, conversation, 'second')
+        second = FakeClaudeCode.instances[1]
+        self.assertEqual((second.options.resume, second.options.fork_session), ('session-1', True))
+        self.assertTrue(second.prompt.startswith('second'))
+        self.assertNotIn('<earlier_conversation>', second.prompt)
+        self.assertEqual(conversation.history[-1]['raw'],
+                         {'subscription': {'session': 'session-2', 'parent': 'session-1'}})
+        self.assertEqual(self.deleted, [])  # session-1 has no parent to remove yet
+
+        self.turn(self.provider, conversation, 'third')
+        self.assertEqual(FakeClaudeCode.instances[2].options.resume, 'session-2')
+        self.assertEqual(self.deleted, ['session-1'])
+
+    def test_deleting_a_chat_deletes_its_sessions(self):
+        conversation = Conversation()
+        self.turn(self.provider, conversation, 'first')
+        self.turn(self.provider, conversation, 'second')
+        self.provider.forget_chat(conversation.history)
+        self.assertEqual(sorted(set(self.deleted)), ['session-1', 'session-2'])
+
+    def test_another_models_reply_or_a_missing_session_means_a_transcript(self):
+        conversation = Conversation()
+        self.turn(self.provider, conversation, 'first')
+        self.saved['session-1'] = False  # Claude Code cleaned it up
+        self.turn(self.provider, conversation, 'second')
+        self.assertIsNone(FakeClaudeCode.instances[1].options.resume)
+        self.assertIn('<earlier_conversation>', FakeClaudeCode.instances[1].prompt)
+
+        conversation.history[-1]['model'] = GLM.ref  # as if another model had replied last
+        self.turn(self.provider, conversation, 'third')
+        self.assertIsNone(FakeClaudeCode.instances[2].options.resume)
+        self.assertIn('[Earlier reply by', FakeClaudeCode.instances[2].prompt)
+
+    def test_a_stopped_turn_is_not_resumed(self):
+        conversation = Conversation()
+        self.turn(self.provider, conversation, 'first')
+
+        async def slow_tool(db, call):
+            await asyncio.Event().wait()
+
+        async def go():
+            async for event in run_single({'subscription': self.provider}, self.db, conversation, 'q', PLAN):
+                if event['type'] == 'tool_running':
+                    stop_turn(conversation)
+        with patch('nembot.chat.execute_tool', slow_tool):
+            asyncio.run(asyncio.wait_for(go(), 10))
+        self.turn(self.provider, conversation, 'after the stop')
+        self.assertIsNone(FakeClaudeCode.instances[2].options.resume)
 
 
 class Prompt(unittest.TestCase):

@@ -12,6 +12,11 @@ let chatMode = 'analyst';  // 'creator' builds plugins; a conversation keeps one
 // its chat while you look at another. Panes of finished chats are dropped once hidden (the
 // saved chat is replayed if reopened). id -> {id, el, mode, webSearch, busy, waiting, firstText}
 const panes = new Map();
+// Streaming replies keep the chat scrolled to the bottom only while you're there: scrolling up
+// to read stops it following, and scrolling back down (or sending a message) resumes it.
+let followLog = true;
+const nearBottom = box => box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+log.addEventListener('scroll', () => { followLog = nearBottom(log); }, { passive: true });
 
 const CREATOR_INTRO = 'Creator mode builds plugins: new chat tools, tabs and buttons for nembot. ' +
   'Describe what you want. The assistant writes the plugin as a draft, tests it in a separate process, ' +
@@ -55,6 +60,7 @@ function showPane(id) {
   drawModeSwitch();
   window.drawChatList?.();
   log.scrollTop = log.scrollHeight;
+  followLog = true;
 }
 
 // Start a fresh conversation in ``mode`` (switching modes always starts a new chat).
@@ -598,7 +604,7 @@ function replyRenderer(reply, pane, text, replay) {
   status.append(throbber(), label);
   reply.append(status);
   let segment = null, markdown = '';
-  const scroll = () => { if (shown()) log.scrollTop = log.scrollHeight; };
+  const scroll = () => { if (shown() && followLog) log.scrollTop = log.scrollHeight; };
   const place = node => { status.parentNode === reply ? reply.insertBefore(node, status) : reply.append(node); scroll(); };
   // Reasoning streams into an open dropdown, which folds itself once the model moves on.
   function endSegment() {
@@ -632,8 +638,9 @@ function replyRenderer(reply, pane, text, replay) {
           segment.append(segment.summary, segment.body);
           place(segment);
         }
+        const following = nearBottom(segment.body);  // the box scrolls too; leave it if you scrolled it up
         segment.body.textContent += event.delta;
-        segment.body.scrollTop = segment.body.scrollHeight;
+        if (following) segment.body.scrollTop = segment.body.scrollHeight;
         scroll();
         break;
       case 'model':
@@ -787,6 +794,7 @@ function replyRenderer(reply, pane, text, replay) {
 
 async function ask(text) {
   const pane = currentPane();
+  followLog = true;  // a new message follows its reply
   pane.busy = true;
   pane.webSearch = webSearch.checked;
   pane.firstText ||= text;

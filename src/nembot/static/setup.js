@@ -40,6 +40,9 @@ function drawSetup(status, rest) {
   page.push(el('h3', 'setup-step', 'Where keys are kept'));
   page.push(keyStorage(status));
 
+  page.push(el('h3', 'setup-step', 'Running code'));
+  page.push(codeSafety(status));
+
   if (status.usable) {
     const go = el('a', 'setup-start', 'Start chatting →');
     go.href = '#chat';
@@ -211,6 +214,22 @@ function keyStorage(status) {
   };
   box.append(label);
   if (!status.keyring_available) box.append(el('p', 'setup-hint', 'To use the keychain, install the optional package: uv sync --extra keyring'));
+  return box;
+}
+
+function codeSafety(status) {
+  const box = el('section', 'setup-card');
+  box.append(el('p', 'setup-note', 'Assistants can write marimo and Jupyter notebooks. nembot runs each one once to check it '
+    + 'works, which runs the assistant’s Python code on this computer. Python code can read, change or delete your files '
+    + 'and use the network.'));
+  const label = el('label', 'toggle');
+  const box2 = el('input'); box2.type = 'checkbox'; box2.checked = status.confirm_code;
+  label.append(box2, document.createTextNode(' Ask me before an assistant runs Python code'));
+  box2.onchange = async () => {
+    try { await sendJSON('/api/setup/settings', 'POST', { confirm_code: box2.checked }); }
+    catch (err) { box2.checked = !box2.checked; alert(err.message); }
+  };
+  box.append(label);
   return box;
 }
 

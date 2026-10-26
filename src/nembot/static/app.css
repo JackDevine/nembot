@@ -302,6 +302,12 @@ nav a.active { background: var(--bg); color: var(--fg); font-weight: 600; }
 .download-card label { display: flex; flex-direction: column; font-size: 13px; color: var(--muted); gap: 2px; }
 .download-card input { font: inherit; color: inherit; background: var(--surface); padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; }
 .download-card .buttons { display: flex; gap: 8px; margin-top: 8px; }
+/* Approval before agent-written code runs */
+.code-card { border: 1px solid var(--warn); border-radius: 12px; padding: 10px 14px; background: color-mix(in srgb, var(--warn) 7%, var(--surface)); max-width: 760px; display: flex; flex-direction: column; gap: 8px; }
+.code-card p { margin: 0; font-size: 14px; }
+.code-card pre.code { max-height: 360px; overflow: auto; margin: 6px 0 0; }
+.code-card .buttons { display: flex; gap: 8px; justify-content: flex-end; }
+.code-status { font-size: 13px; color: var(--muted); }
 /* Questionnaire cards: the agent's multiple-choice questions */
 .questions-card { border: 1px solid var(--accent); border-radius: 12px; padding: 10px 14px; background: var(--card-bg); max-width: 680px; display: flex; flex-direction: column; gap: 10px; }
 .questions-card fieldset.question { border: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }

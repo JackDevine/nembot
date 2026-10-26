@@ -25,8 +25,9 @@ def _free_port() -> int:
 
 
 class NotebookServers:
-    def __init__(self, directory: Path, app_url: str):
-        self.directory, self.app_url = directory, app_url
+    def __init__(self, directory: Path, app_url: str, database: str | None = None, prepare=None):
+        self.directory, self.app_url, self.database = directory, app_url, database
+        self.prepare = prepare  # prepare(kind) runs before a server starts (e.g. marimo's settings file)
         self.servers: dict[str, tuple[subprocess.Popen, int, str]] = {}
         self.lock = threading.Lock()
         atexit.register(self.stop)
@@ -45,9 +46,11 @@ class NotebookServers:
             if running and running[0].poll() is None:
                 return running[1], running[2]
             self.directory.mkdir(parents=True, exist_ok=True)
+            if self.prepare is not None:
+                self.prepare(kind)
             port, token = _free_port(), secrets.token_urlsafe(16)
             log = (self.directory / f'.{kind}.log').open('ab')
-            env = {**os.environ, 'NEMBOT_URL': self.app_url}
+            env = {**os.environ, 'NEMBOT_URL': self.app_url, **({'NEMBOT_DATABASE': self.database} if self.database else {})}
             process = subprocess.Popen(self._command(kind, port, token), stdout=log, stderr=subprocess.STDOUT,
                                        stdin=subprocess.DEVNULL, env=env, cwd=self.directory)
             self.servers[kind] = (process, port, token)
@@ -72,6 +75,11 @@ class NotebookServers:
         if kind == 'jupyter':
             return f'http://127.0.0.1:{port}/lab/tree/{quoted}?token={token}'
         return f'http://127.0.0.1:{port}/?file={quoted}&access_token={token}'
+
+    def running(self, kind: str) -> tuple[int, str] | None:
+        """(port, token) of a server that's already running, without starting one."""
+        server = self.servers.get(kind)
+        return (server[1], server[2]) if server and server[0].poll() is None else None
 
     def stop(self):
         for process, _, _ in list(self.servers.values()):

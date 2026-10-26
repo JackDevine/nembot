@@ -7,6 +7,7 @@ file is opened read-only instead. Results travel as Parquet to keep types.
 """
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import urllib.error
@@ -27,12 +28,18 @@ def parquet_bytes(connection: duckdb.DuckDBPyConnection, sql: str) -> bytes:
         return path.read_bytes()
 
 
-def query(sql: str, url: str = 'http://127.0.0.1:8000', database: str = 'data/nem.duckdb') -> pl.DataFrame:
+# The notebook servers nembot starts set these, so a notebook can just call query(sql).
+DEFAULT_URL = os.environ.get('NEMBOT_URL', 'http://127.0.0.1:8000')
+DEFAULT_DATABASE = os.environ.get('NEMBOT_DATABASE', 'data/nem.duckdb')
+
+
+def query(sql: str, url: str | None = None, database: str | None = None) -> pl.DataFrame:
     return pl.read_parquet(io.BytesIO(query_parquet(sql, url, database)))
 
 
-def query_parquet(sql: str, url: str = 'http://127.0.0.1:8000', database: str = 'data/nem.duckdb') -> bytes:
+def query_parquet(sql: str, url: str | None = None, database: str | None = None) -> bytes:
     """The result of one SELECT as Parquet bytes, from the app or else the file."""
+    url, database = url or DEFAULT_URL, database or DEFAULT_DATABASE
     request = urllib.request.Request(url.rstrip('/') + '/api/query', data=json.dumps({'sql': sql}).encode(),
                                      headers={'Content-Type': 'application/json'})
     try:

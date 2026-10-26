@@ -13,6 +13,7 @@ dependencies = [
     "claude-agent-sdk>=0.2.174",
     "duckdb>=1.4,<2",
     "ipykernel>=7.4.0",
+    "ipywidgets>=8.1.9",
     "jupyterlab>=4.6.4",
     "marimo>=0.24.2",
     "nbformat>=5.11.1",

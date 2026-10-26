@@ -22,6 +22,8 @@ import uvicorn
 from . import chats, client, credentials, docs, downloads, explorer, live, plugins, reports, setup, snippets, subscription
 from .creator import Creator
 from .notebooks import NotebookServers
+from . import notebook_context
+from .notebook_files import NotebookFiles
 from .ingest import SUPPORTED
 from .chat import MAX_COMPARE, Conversation, model_event, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
 from .connections import Connections
@@ -82,7 +84,10 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
     docs.ensure(db)
     chats.ensure(db)
     report_dir = Path(database).absolute().parent / 'reports'
-    notebook_servers = NotebookServers(report_dir, url)
+    notebook_servers = NotebookServers(
+        report_dir, url, str(Path(database).absolute()),
+        prepare=lambda kind: notebook_context.write_marimo_project(report_dir, db) if kind == 'marimo' else None)
+    notebook_files = NotebookFiles(report_dir, url, str(Path(database).absolute()), servers=notebook_servers)
 
     def plugin_query(sql: str):
         import io
@@ -132,6 +137,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         return JSONResponse({'cards': await connections.status(), 'usable': len(catalog.usable()),
                              'errors': catalog.errors, 'config': str(credentials.path()),
                              'keyring': bool(credentials.setting('keyring', False)),
+                             'confirm_code': bool(credentials.setting('confirm_code', True)),
                              'keyring_available': credentials.keyring_available(),
                              'has_data': await asyncio.to_thread(setup_has_data)})
 
@@ -177,6 +183,8 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         if refused := setup_guard(request):
             return refused
         body = await request.json()
+        if 'confirm_code' in body:
+            await asyncio.to_thread(credentials.set_setting, 'confirm_code', bool(body['confirm_code']))
         if 'keyring' in body:
             try:
                 await asyncio.to_thread(credentials.use_keyring, bool(body['keyring']))
@@ -271,7 +279,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
                 conversation.branches = None  # an earlier compare turn's choice is final now
                 options = dict(web_search=web_search, jobs=jobs, exporter=exporter, plugin_manager=plugin_manager,
                                creator=creator, documents=lambda *a: documents(*a, conversation_id),
-                               interactive=True, efforts=efforts)
+                               interactive=True, efforts=efforts, notebook_files=notebook_files)
                 if len(chosen) > 1:
                     turn_events = run_compare(providers, db, conversation, text, chosen, describe_error=_api_error,
                                               **options)
@@ -348,13 +356,15 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         return JSONResponse({'ok': True, 'branch': branch})
 
     async def chat_answer(request: Request):
-        """The user's answers to a questionnaire card (or a skip)."""
+        """The user's reply to a card waiting in the chat: questionnaire answers (or a skip), or
+        approval to run agent-written code ({approve, remember})."""
         body = await request.json()
         conversation = conversations.get(str(body.get('conversation', '')))
         future = conversation and conversation.pending.get(str(body.get('request', '')))
         if not future or future.done():
-            return JSONResponse({'error': 'these questions are no longer waiting for an answer'}, status_code=404)
-        future.set_result({'skipped': bool(body.get('skipped')), 'answers': body.get('answers')})
+            return JSONResponse({'error': 'this is no longer waiting for an answer'}, status_code=404)
+        future.set_result({'skipped': bool(body.get('skipped')), 'answers': body.get('answers'),
+                           'approve': bool(body.get('approve')), 'remember': bool(body.get('remember'))})
         return JSONResponse({'ok': True})
 
     async def chat_decision(request: Request):

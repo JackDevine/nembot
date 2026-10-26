@@ -377,6 +377,39 @@ function questionsCard(event, chatId) {
   return card;
 }
 
+// Approval before agent-written Python runs on this computer (e.g. checking a notebook it wrote).
+function codeRequestCard(event, chatId) {
+  const card = el('div', 'code-card');
+  card.dataset.request = event.id;
+  card.append(el('b', '', `⚠️ The assistant wants to run Python code on your computer`),
+    el('p', '', `${event.reason || `To check ${event.what} works, nembot runs it once before saving it.`} Python code `
+      + 'can do anything you can: read, change or delete files, and use the network. Only run it if you are happy with what it does.'));
+  const lines = event.code.split('\n').length;
+  const code = details(`Show the code (${lines} line${lines === 1 ? '' : 's'})`, el('pre', 'code', event.code));
+  const remember = el('input'); remember.type = 'checkbox';
+  const rememberLabel = el('label', 'toggle'); rememberLabel.append(remember, ' Don’t ask again (you can turn this back on in Settings)');
+  const run = el('button', 'primary', 'Run it'), skip = el('button', '', 'Don’t run');
+  run.type = skip.type = 'button';
+  const status = el('div', 'code-status');
+  const send = async approve => {
+    run.disabled = skip.disabled = remember.disabled = true;
+    try { await sendJSON('/api/chat/answer', 'POST', { conversation: chatId, request: event.id, approve, remember: approve && remember.checked }); }
+    catch (err) { status.textContent = err.message; }
+  };
+  run.onclick = () => send(true);
+  skip.onclick = () => send(false);
+  const buttons = el('div', 'buttons'); buttons.append(skip, run);
+  card.append(code, rememberLabel, buttons, status);
+  return card;
+}
+
+function updateCodeCard(card, event) {
+  card.querySelectorAll('button, input').forEach(b => { b.disabled = true; });
+  card.querySelector('.buttons')?.remove();
+  card.querySelector('.code-status').textContent = event.approved ? '✓ Allowed to run.'
+    : event.timeout ? 'No answer; the code was not run.' : 'Not run.';
+}
+
 // Show what was answered (live, or when a saved chat is replayed) and lock the card.
 function updateQuestionsCard(card, event) {
   card.querySelectorAll('input').forEach(i => { i.disabled = true; });
@@ -653,6 +686,8 @@ function replyRenderer(reply, pane, text, replay) {
           describe_table: 'Reading table docs…', request_download: 'Preparing a download request…',
           create_report: 'Building the report (re-running its queries)…',
           create_document: 'Writing the document…',
+          read_guide: 'Reading a guide…', read_notebook: 'Reading the notebook…',
+          write_notebook: 'Checking and running the notebook…', questionnaire: 'Preparing questions…',
           inspect_runtime: 'Inspecting the app…', list_plugin_files: 'Reading the plugin draft…',
           read_plugin_file: 'Reading a plugin file…', write_plugin_file: 'Writing a plugin file…',
           delete_plugin_file: 'Deleting a plugin file…', test_plugin: 'Testing the plugin in a separate process…',
@@ -736,6 +771,19 @@ function replyRenderer(reply, pane, text, replay) {
         if (!replay && shown()) openDocBeside(event.id);
         break;
       }
+      case 'code_request':
+        endSegment();
+        place(codeRequestCard(event, pane.id));
+        label.textContent = 'Waiting for your answer…';
+        waiting(true);
+        break;
+      case 'code_decision': {
+        waiting(false);
+        const card = reply.querySelector(`.code-card[data-request="${CSS.escape(event.id)}"]`);
+        if (card) updateCodeCard(card, event);
+        label.textContent = event.approved ? 'Checking and running the notebook…' : 'Thinking…';
+        break;
+      }
       case 'questions':
         endSegment();
         place(questionsCard(event, pane.id));
@@ -771,7 +819,7 @@ function replyRenderer(reply, pane, text, replay) {
       case 'stopped':  // the user pressed Stop: what was written stays, approval cards can't be answered
         endSegment();
         status.remove();
-        reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button, .questions-card button, .questions-card input')
+        reply.querySelectorAll('.download-card .buttons button, .install-card .buttons button, .questions-card button, .questions-card input, .code-card button, .code-card input')
           .forEach(b => { b.disabled = true; });
         place(el('div', 'stopped-note', '■ Stopped'));
         waiting(false);
@@ -786,7 +834,7 @@ function replyRenderer(reply, pane, text, replay) {
     endSegment();
     status.remove();
     // Approval cards from a saved chat can't be answered any more.
-    if (replay) reply.querySelectorAll('.download-card .buttons button, .questions-card button, .questions-card input')
+    if (replay) reply.querySelectorAll('.download-card .buttons button, .questions-card button, .questions-card input, .code-card button, .code-card input')
       .forEach(b => { b.disabled = true; });
   }
   return { handle, finish, status };

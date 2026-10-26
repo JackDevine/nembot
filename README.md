@@ -152,6 +152,16 @@ marimo. Files are saved in `data/reports/` and listed on the **Reports** tab.
 Notebooks open in JupyterLab or marimo, which the app starts locally on
 demand; they query the database through the running app.
 
+The chat can also **write its own notebooks** with any Python ("make a marimo
+notebook where I pick the region and fuel type from dropdowns"). It reads a
+marimo or Jupyter guide first, and nembot checks and runs each notebook once
+before saving it, so you don't get one that fails. In a marimo notebook you
+have open, the chat can also work live: inspect variables, and add, edit and
+run cells. Running notebook code runs Python on your computer, so the chat asks
+first (you can turn that off on the Settings page). marimo's own AI assistant
+gets a background on the NEM data for notebooks in nembot's folder, and those
+notebooks run when opened.
+
 ## Explorer
 
 The **Explorer** tab lists every table published in the MMSDM monthly archive,

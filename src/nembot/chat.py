@@ -24,7 +24,8 @@ import altair
 import duckdb
 import vl_convert
 
-from . import catalog, downloads, explorer, live
+from . import catalog, downloads, explorer, guides, live
+from .notebook_files import LIVE_TOOL as RUN_IN_MARIMO, READ_TOOL as READ_NOTEBOOK, WRITE_TOOL as WRITE_NOTEBOOK
 from .ingest import SUPPORTED, _month_shift
 from .models import ModelInfo, public as model_public
 
@@ -43,8 +44,8 @@ Your tools work on a local DuckDB copy of AEMO's public MMS data (the `nem` data
   downloading months of a table from AEMO. The user sees a popup and may change the
   months. It returns once the download has finished, failed or been declined.
 - `create_report(format, title, content)` exports a report (html, pdf, docx, pptx, xlsx) or a
-  runnable notebook (jupyter, marimo) built from this conversation's results. Only use it
-  when the user asks for a report, document, deck, workbook or notebook.
+  runnable notebook (jupyter, marimo) that simply re-runs this conversation's results. Only use
+  it when the user asks for a report, document, deck, workbook or a notebook of these results.
   Every query/plot result has an id (shown as "Result id: R3" in tool output). Write the
   content in markdown and put a result on its own line as [[R3]] to include it. Use ##
   headings for sections (each section becomes a slide in pptx). Include only results that
@@ -144,8 +145,17 @@ Web search:
   came from the web; citations are shown to the user automatically."""
 
 
+_NOTEBOOK_TOOLS = """- `write_notebook(name, format, code | cells)` writes a marimo or Jupyter notebook with any Python
+  (widgets, custom analysis, charts) when the user wants a notebook to explore or reuse. nembot checks
+  and runs it before saving. `read_notebook(name)` reads one back. Read the marimo or jupyter guide first.
+- `run_in_marimo(notebook, code)` works inside a marimo notebook the user has open: inspect its variables,
+  or add, edit and run cells live. Read the marimo guide's LIVE section first.
+"""
+
+
 def system_prompt(vision: bool, web_search: bool = False) -> str:
-    prompt = _PROMPT_HEAD + (_VISION_TOOLS if vision else _NO_VISION_TOOLS) + _PROMPT_TAIL
+    prompt = (_PROMPT_HEAD + _NOTEBOOK_TOOLS + guides.prompt_index() + (_VISION_TOOLS if vision else _NO_VISION_TOOLS)
+              + _PROMPT_TAIL)
     return prompt + _WEB_SEARCH if web_search else prompt
 
 
@@ -277,6 +287,10 @@ TOOLS = [
             'required': ['sql', 'plot_spec'],
         },
     },
+    guides.TOOL,
+    WRITE_NOTEBOOK,
+    READ_NOTEBOOK,
+    RUN_IN_MARIMO,
 ]
 REQUIRED_INPUTS = {tool['name']: tuple(tool['input_schema']['required']) for tool in TOOLS}
 
@@ -620,6 +634,30 @@ def answers_text(questions: list[dict], answers: list[dict]) -> str:
     return '\n'.join(lines)
 
 
+async def approve_code(conversation: 'Conversation', call: dict, code: str, reason: str) -> AsyncIterator[dict]:
+    """Ask before running agent-written Python (unless turned off in Settings). Ends with
+    ``{'type': 'approval', 'approved': bool}``."""
+    from . import credentials
+    if not credentials.setting('confirm_code', True):
+        yield {'type': 'approval', 'approved': True}
+        return
+    request_id = call['id']
+    future = asyncio.get_running_loop().create_future()
+    conversation.pending[request_id] = future
+    yield {'type': 'code_request', 'id': request_id, 'reason': reason, 'code': code}
+    try:
+        reply = await asyncio.wait_for(future, DECISION_TIMEOUT)
+    except TimeoutError:
+        reply = {'approve': False, 'timeout': True}
+    finally:
+        conversation.pending.pop(request_id, None)
+    approved = bool(reply.get('approve'))
+    if approved and reply.get('remember'):
+        await asyncio.to_thread(credentials.set_setting, 'confirm_code', False)
+    yield {'type': 'code_decision', 'id': request_id, 'approved': approved, 'timeout': bool(reply.get('timeout'))}
+    yield {'type': 'approval', 'approved': approved}
+
+
 async def questionnaire(conversation: 'Conversation', call: dict) -> AsyncIterator[dict]:
     """Show the questions in the chat and wait for the user's answers (or a skip)."""
     def result(text, is_error=False):
@@ -776,7 +814,7 @@ async def _plugin_tool(plugin_manager, tool, call) -> AsyncIterator[dict]:
 async def run_turn(providers: dict, db, conversation: Conversation, text: str, model: ModelInfo,
                    web_search: bool = False, jobs=None, exporter=None, plugin_manager=None,
                    creator=None, documents=None, doc_session=None, interactive: bool = False,
-                   efforts: dict | None = None) -> AsyncIterator[dict]:
+                   efforts: dict | None = None, notebook_files=None) -> AsyncIterator[dict]:
     """Stream UI events for one user turn, running tools until the model finishes.
 
     Plots are emitted as soon as their tool finishes; only the latest query
@@ -786,6 +824,7 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
     ``interactive`` (a person is watching the chat) adds the questionnaire tool; unattended runs
     such as evals leave it out so they never wait for answers.
     ``efforts`` maps model refs to the reasoning level picked for them (see chosen_effort).
+    ``notebook_files`` (notebook_files.NotebookFiles) runs write_notebook and read_notebook.
     """
     provider = providers[model.provider]
     web_search = web_search and getattr(provider, 'web_search', True)  # e.g. Ollama has no web search
@@ -846,6 +885,70 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
                                             'image': None, 'is_error': event['is_error']})
                         else:
                             yield event
+                    continue
+                if call['name'] == 'read_guide' and valid_input(call['name'], call['input']):
+                    text, is_error = guides.read(call['input']['name'], call['input'].get('section'))
+                    results.append({'id': call['id'], 'name': call['name'], 'text': text, 'image': None,
+                                    'is_error': is_error})
+                    continue
+                if call['name'] == 'run_in_marimo' and valid_input(call['name'], call['input']):
+                    args = call['input']
+                    result = {'id': call['id'], 'name': call['name'], 'image': None}
+                    approved = True
+                    if notebook_files is None:
+                        result.update(text='Notebooks are not available here.', is_error=True)
+                        approved = False
+                    elif interactive:  # it runs in the user's own notebook kernel
+                        reason = (f"It runs in your open marimo notebook {args['notebook']}, where it can also add, "
+                                  'change or delete cells.')
+                        async for event in approve_code(conversation, call, args['code'], reason):
+                            if event['type'] == 'approval':
+                                approved = event['approved']
+                            else:
+                                yield event
+                        if not approved:
+                            result.update(text='The user chose not to run this code in their notebook.', is_error=True)
+                    if approved:
+                        result['text'], result['is_error'] = await notebook_files.run_in_marimo(args['notebook'], args['code'])
+                    results.append(result)
+                    continue
+                if call['name'] in ('write_notebook', 'read_notebook') and valid_input(call['name'], call['input']):
+                    args = call['input']
+                    result = {'id': call['id'], 'name': call['name'], 'image': None, 'is_error': False}
+                    if notebook_files is None:
+                        result.update(text='Notebooks are not available here.', is_error=True)
+                    elif call['name'] == 'read_notebook':
+                        result['text'], result['is_error'] = notebook_files.read(args['name'])
+                    else:
+                        cells = args.get('cells')
+                        if isinstance(cells, str):  # some models send the list as a JSON string
+                            try:
+                                cells = json.loads(cells)
+                            except json.JSONDecodeError:
+                                cells = None
+                        approved = True
+                        if interactive:  # checking a notebook runs its code on the user's computer
+                            code = args.get('code') if args['format'] == 'marimo' else '\n\n# ---- next cell ----\n\n'.join(
+                                str(c.get('source', '')) for c in cells or [] if isinstance(c, dict) and c.get('type') != 'markdown')
+                            kind = 'marimo' if args['format'] == 'marimo' else 'Jupyter'
+                            reason = (f"To check the {kind} notebook {args['name']} works, nembot runs it once before "
+                                      'saving it.')
+                            async for event in approve_code(conversation, call, str(code or ''), reason):
+                                if event['type'] == 'approval':
+                                    approved = event['approved']
+                                else:
+                                    yield event
+                        outcome = (await notebook_files.write(args['name'], args['format'], args.get('code'), cells,
+                                                              bool(args.get('overwrite'))) if approved else
+                                   {'ok': False, 'problems': 'The user chose not to run this code, so the notebook was '
+                                                             'not checked or saved. Ask what they would like changed.'})
+                        if outcome['ok']:
+                            yield {'type': 'report', **{k: v for k, v in outcome.items() if k != 'ok'}}
+                            result['text'] = (f"Saved {outcome['file']}; it checked and ran without errors. The user "
+                                              'can open it from the link in the chat.')
+                        else:
+                            result.update(text=f"The notebook was not saved.\n{outcome['problems']}", is_error=True)
+                    results.append(result)
                     continue
                 if call['name'] == 'request_download' and valid_input(call['name'], call['input']):
                     async for event in request_download(db, jobs, conversation, call):

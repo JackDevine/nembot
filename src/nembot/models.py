@@ -27,8 +27,9 @@ class ModelInfo:
 
 
 class Catalog:
-    def __init__(self, claude: anthropic.AsyncAnthropic):
+    def __init__(self, claude: anthropic.AsyncAnthropic, plan_models=None):
         self._claude = claude
+        self._plan_models = plan_models  # async () -> (models, error): the Claude plan's models (subscription.py)
         self._models: dict[str, ModelInfo] = {}
         self._fetched = 0.0
         self._lock = asyncio.Lock()
@@ -38,8 +39,9 @@ class Catalog:
         async with self._lock:
             if not self._models or time.monotonic() - self._fetched > CACHE_SECONDS:
                 self.errors = []
-                claude, openrouter = await asyncio.gather(self._claude_models(), self._openrouter_models())
-                models = {m.ref: m for m in claude + openrouter}
+                plan, claude, openrouter = await asyncio.gather(
+                    self._subscription_models(), self._claude_models(), self._openrouter_models())
+                models = {m.ref: m for m in plan + claude + openrouter}
                 if models:
                     self._models, self._fetched = models, time.monotonic()
             return self._models
@@ -51,6 +53,22 @@ class Catalog:
         if ref == DEFAULT_MODEL:  # usable even if the models API could not be reached
             return ModelInfo(ref, 'claude', ref.split(':', 1)[1], 'Claude Opus 5.5', True, True, True)
         return None
+
+    def default(self) -> str:
+        """DEFAULT_MODEL, or the same model through the Claude plan when the API isn't signed in."""
+        plan = 'subscription:' + DEFAULT_MODEL.split(':', 1)[1]
+        return plan if DEFAULT_MODEL not in self._models and plan in self._models else DEFAULT_MODEL
+
+    async def _subscription_models(self) -> list[ModelInfo]:
+        if self._plan_models is None:
+            return []
+        try:
+            models, error = await asyncio.wait_for(self._plan_models(), 60)
+        except Exception as exc:  # Claude Code missing or failing to start
+            models, error = [], f'Claude plan models unavailable: {type(exc).__name__}: {exc}'
+        if error:
+            self.errors.append(error)
+        return models
 
     async def _claude_models(self) -> list[ModelInfo]:
         try:

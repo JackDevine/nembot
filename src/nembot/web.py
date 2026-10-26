@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 
 import anthropic
+import claude_agent_sdk
 import duckdb
 import openai
 from starlette.applications import Starlette
@@ -17,13 +18,13 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 import uvicorn
 
-from . import chats, client, docs, downloads, explorer, live, plugins, reports, snippets
+from . import chats, client, docs, downloads, explorer, live, plugins, reports, snippets, subscription
 from .creator import Creator
 from .notebooks import NotebookServers
 from .ingest import SUPPORTED
 from .chat import MAX_COMPARE, Conversation, keep_branch, rerun_chart, run_compare, run_single, run_turn, stop_turn
 from .claude import ClaudeProvider
-from .models import DEFAULT_MODEL, Catalog, public
+from .models import Catalog, public
 from .openrouter import OpenRouterProvider
 
 STATIC = Path(__file__).parent / 'static'
@@ -51,6 +52,12 @@ def _api_error(exc: Exception) -> str:
     match exc:
         case anthropic.AuthenticationError():
             return 'Anthropic authentication failed. Run `ant auth login` or set ANTHROPIC_API_KEY.'
+        case subscription.PlanError():
+            return str(exc)
+        case claude_agent_sdk.CLINotFoundError():
+            return 'Claude Code was not found, so the Claude plan models cannot run.'
+        case claude_agent_sdk.ClaudeSDKError():
+            return f'Claude Code error: {exc}'
         case openai.AuthenticationError():
             return 'OpenRouter authentication failed. Check OPENROUTER_API_KEY.'
         case anthropic.RateLimitError() | openai.RateLimitError():
@@ -95,8 +102,9 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         return {'id': doc['id'], 'title': doc['title'], 'missing': missing, 'errors': errors}
 
     claude = anthropic.AsyncAnthropic()
-    catalog = Catalog(claude)
-    providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider()}
+    catalog = Catalog(claude, subscription.list_models)
+    providers = {'claude': ClaudeProvider(claude), 'openrouter': OpenRouterProvider(),
+                 'subscription': subscription.SubscriptionProvider()}
     conversations: dict[str, Conversation] = {}
 
     async def index(request: Request):
@@ -104,7 +112,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
 
     async def models(request: Request):
         listed = await catalog.models()
-        return JSONResponse({'default': DEFAULT_MODEL, 'errors': catalog.errors,
+        return JSONResponse({'default': catalog.default(), 'errors': catalog.errors,
                              'models': [public(m) for m in listed.values()]})
 
     async def chat(request: Request):
@@ -114,7 +122,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
         if not text or not conversation_id:
             return JSONResponse({'error': 'message and conversation are required'}, status_code=400)
         # Several models answer side by side (a compare turn); the first is the chat's model.
-        refs = body.get('models') or [body.get('model') or DEFAULT_MODEL]
+        refs = body.get('models') or [body.get('model') or catalog.default()]
         if not isinstance(refs, list) or len(set(map(str, refs))) != len(refs) or not 1 <= len(refs) <= MAX_COMPARE:
             return JSONResponse({'error': f'choose 1 to {MAX_COMPARE} different models'}, status_code=400)
         chosen = []
@@ -261,7 +269,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
             return JSONResponse({'error': 'sql is required'}, status_code=400)
         question = str(body.get('question') or '')[:2000] or None
         name = snippets.fallback_name(sql, plot_spec)
-        model = await catalog.get(str(body.get('model') or DEFAULT_MODEL))
+        model = await catalog.get(str(body.get('model') or catalog.default()))
         if model and model.available:
             try:  # the current chat model suggests a name; the user can edit it
                 name = await asyncio.wait_for(
@@ -372,7 +380,7 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
                   and isinstance(b.get('text'), str)]
         if not request_text:
             return JSONResponse({'error': 'request is required'}, status_code=400)
-        model = await catalog.get(str(body.get('model') or DEFAULT_MODEL))
+        model = await catalog.get(str(body.get('model') or catalog.default()))
         if model is None or not model.tools or not model.available:
             return JSONResponse({'error': 'choose a model that can use tools'}, status_code=400)
         messages = [m for m in body.get('messages') or [] if isinstance(m, dict)]

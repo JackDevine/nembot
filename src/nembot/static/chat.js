@@ -28,7 +28,7 @@ function drawModeSwitch() {
 
 function createPane(id, mode, webSearchOn) {
   const pane = { id, el: el('div', 'chat-pane'), mode, webSearch: webSearchOn, busy: false, waiting: false, firstText: null,
-    stats: { requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, searches: 0, cost: 0, unpriced: false, genSeconds: 0, genOutput: 0 } };
+    stats: { requests: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0, searches: 0, cost: 0, unpriced: false, plan: 0, genSeconds: 0, genOutput: 0 } };
   pane.el.hidden = true;
   if (mode === 'creator') pane.el.append(el('div', 'creator-banner', CREATOR_INTRO));
   log.append(pane.el);
@@ -91,10 +91,16 @@ let compareModels = [];
 const MAX_COMPARE = 4;
 const compareChips = document.getElementById('compare-chips');
 
+// Where a model runs: the Anthropic API, the user's Claude plan (through Claude Code), or OpenRouter.
+const PROVIDERS = [['subscription', 'Claude plan', 'Claude (your Claude plan, through Claude Code)'],
+  ['claude', 'Claude', 'Claude (Anthropic API)'], ['openrouter', 'OpenRouter', 'OpenRouter']];
+function providerLabel(provider) { return (PROVIDERS.find(p => p[0] === provider) || [, provider])[1]; }
+
 function modelBadges(m) {
   const meta = el('span', 'meta');
   meta.append(m.vision ? el('span', 'badge image', 'text + image') : el('span', 'badge textonly', 'text only'));
   if (!m.tools) meta.append(el('span', 'badge notools', 'no tools'));
+  if (m.provider === 'subscription') meta.append(el('span', 'badge', 'uses your plan'));
   if (m.price_in !== null && m.price_out !== null) meta.append(el('span', 'badge', `$${m.price_in}/$${m.price_out} per M`));
   return meta;
 }
@@ -102,7 +108,7 @@ function modelBadges(m) {
 function setModel(m) {
   currentModel = m;
   localStorage.setItem('model', m.ref);
-  modelButton.textContent = `${m.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${m.name}`;
+  modelButton.textContent = `${providerLabel(m.provider)} · ${m.name}`;
   modelButton.title = `${m.ref} — ${m.vision ? 'text + image input' : 'text-only input: cannot see plots'}`;
   setCompareModels(compareModels.filter(c => c.ref !== m.ref));
 }
@@ -137,7 +143,7 @@ function turnModels(pane) {
 function drawModels() {
   const query = modelSearch.value.trim().toLowerCase();
   modelList.replaceChildren();
-  for (const [provider, title] of [['claude', 'Claude (Anthropic API)'], ['openrouter', 'OpenRouter']]) {
+  for (const [provider, , title] of PROVIDERS) {
     const group = models.filter(m => m.provider === provider &&
       (!query || m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query)));
     if (!group.length) continue;
@@ -373,7 +379,8 @@ function addUsage(stats, u) {
   stats.requests += 1;
   stats.input += u.input || 0; stats.cacheRead += u.cache_read || 0; stats.cacheWrite += u.cache_write || 0;
   stats.output += u.output || 0; stats.searches += u.searches || 0;
-  if (u.cost === null || u.cost === undefined) stats.unpriced = true; else stats.cost += u.cost;
+  if (u.plan) stats.plan += 1;  // covered by the Claude plan: no per-token cost
+  else if (u.cost === null || u.cost === undefined) stats.unpriced = true; else stats.cost += u.cost;
   if (u.seconds > 0) { stats.genSeconds += u.seconds; stats.genOutput += u.output || 0; }
 }
 
@@ -393,6 +400,7 @@ function drawChatStats() {
     `Model requests: ${s.requests}` + (s.searches ? `; web searches: ${s.searches}` : ''),
     speed === null ? '' : 'Speed: output tokens per second while generating, averaged over the chat',
     s.unpriced ? 'Some replies came from models without price data, so the cost is a lower bound.' : '',
+    s.plan ? `${s.plan === s.requests ? 'All' : s.plan} model requests ran on your Claude plan: they count toward its usage limits and aren't in the cost.` : '',
   ].filter(Boolean).join('\n');
   chatStats.hidden = false;
 }
@@ -447,7 +455,7 @@ function compareColumns(turn, reply, pane, text, replay, models) {
       } catch (err) { alert(err.message); }
       keep.disabled = false;
     };
-    head.append(el('b', '', `${m.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${m.name}`), el('span', 'kept-label', '✓ continuing from this'), stop, keep);
+    head.append(el('b', '', `${providerLabel(m.provider)} · ${m.name}`), el('span', 'kept-label', '✓ continuing from this'), stop, keep);
     const body = el('div', 'assistant');
     col.append(head, body);
     grid.append(col);
@@ -492,7 +500,7 @@ function replyRenderer(reply, pane, text, replay) {
         segment.textContent += event.delta;
         break;
       case 'model':
-        reply.prepend(el('div', 'via', `${event.model.provider === 'claude' ? 'Claude' : 'OpenRouter'} · ${event.model.name}`));
+        reply.prepend(el('div', 'via', `${providerLabel(event.model.provider)} · ${event.model.name}`));
         break;
       case 'tool':
       case 'tool_running':

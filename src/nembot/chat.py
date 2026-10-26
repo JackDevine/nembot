@@ -769,6 +769,10 @@ async def run_turn(providers: dict, db, conversation: Conversation, text: str, m
         # Leave history ending on a complete turn (no tool call without its result).
         del history[start:]
         raise
+    finally:
+        # A provider that keeps a session open across tool rounds (subscription.py) ends it here.
+        if close_turn := getattr(provider, 'close_turn', None):
+            await close_turn(history)
     if latest_table is not None:
         yield latest_table
 

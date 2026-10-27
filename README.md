@@ -8,6 +8,8 @@ monthly MMS archive) into a local DuckDB database, and an AI assistant of your c
 SQL, tables and interactive charts. It can also write reports, shared documents and marimo or Jupyter
 notebooks, and it runs entirely on your computer.
 
+![A chat answer: average monthly price by region, charted from AEMO's dispatch prices with the SQL and timings above it](docs/screenshots/chat-chart.png)
+
 ## Quick start
 
 You need [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 and every dependency for you) and an AI
@@ -27,6 +29,28 @@ question needs data you haven't downloaded, the assistant asks before downloadin
 
 Everything nembot stores lives in `data/` (the database and downloaded files) and
 `~/.config/nembot/credentials.toml` (your keys, readable only by you).
+
+## A tour
+
+**Compare models.** Ask several models the same question side by side, each at its own reasoning level, and
+continue the chat from whichever answer you prefer.
+
+![Three models answering "How many DUIDs are there in each region?" side by side](docs/screenshots/compare-models.png)
+
+**Explore AEMO's tables.** Every table in AEMO's monthly archive, with its documentation, download status and
+a fast table view (column summaries, filters, a SQL editor and "Ask the chat about this table").
+
+![The Explorer showing DISPATCHPRICE: its description, loading notes and rows](docs/screenshots/explorer.png)
+
+**Write with nembot.** Shared documents hold live tables and charts; highlight text to comment or ask nembot,
+and accept or reject its suggested edits.
+
+![A shared document with a data table and a suggested edit from nembot in the comments](docs/screenshots/docs.png)
+
+**Keep useful queries.** Snippets save a query or chart and re-run it on the latest data every time you open
+it.
+
+![A saved snippet: QLD1 daily price statistics, re-run on live data](docs/screenshots/snippets.png)
 
 ## Data loader
 

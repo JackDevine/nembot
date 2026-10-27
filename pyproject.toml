@@ -1,8 +1,10 @@
 [project]
 name = "nembot"
 version = "0.1.0"
-description = "Add your description here"
+description = "Ask questions about Australia's National Electricity Market, answered from a local copy of AEMO's public data."
 readme = "README.md"
+license = "PolyForm-Noncommercial-1.0.0"
+license-files = ["LICENSE", "LICENSES/*"]
 authors = [
     { name = "Jack Devine", email = "jack.neville.devine@gmail.com" }
 ]
@@ -15,7 +17,7 @@ dependencies = [
     "ipykernel>=7.4.0",
     "ipywidgets>=8.1.9",
     "jupyterlab>=4.6.4",
-    "marimo>=0.24.2",
+    "marimo>=0.24.2,<0.25",
     "nbformat>=5.11.1",
     "openai>=3.35.1",
     "openpyxl>=3.1.5",

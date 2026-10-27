@@ -2,13 +2,37 @@
 
 # nembot
 
-Load public AEMO MMS data into a local DuckDB database.
+Ask questions about Australia's National Electricity Market (NEM) and get answers from AEMO's own public data.
+nembot downloads AEMO's market data (prices, demand, generation, unit details and any other table in AEMO's
+monthly MMS archive) into a local DuckDB database, and an AI assistant of your choice answers questions with
+SQL, tables and interactive charts. It can also write reports, shared documents and marimo or Jupyter
+notebooks, and it runs entirely on your computer.
 
-`load_mms` downloads monthly AEMO MMSDM archive ZIPs (June–August 2026 was the
-initial verified window), parses the MMS C/I/D CSV envelope and loads four
-tables — DISPATCHPRICE, DISPATCHREGIONSUM, DISPATCH_UNIT_SCADA and
-DUDETAILSUMMARY — into a persistent DuckDB database. DUDETAILSUMMARY is loaded
-as effective-dated reference history, not interval data.
+## Quick start
+
+You need [uv](https://docs.astral.sh/uv/) (it installs Python 3.14 and every dependency for you) and an AI
+service that supports tool calling: an OpenRouter or Anthropic account, an OpenAI, Gemini or DeepSeek key, or
+models running locally with Ollama or LM Studio.
+
+```bash
+git clone <this repository's URL> nembot
+cd nembot
+uv run nembot-chat
+```
+
+Then open http://127.0.0.1:8000. The first time, a **Settings** page walks you through connecting an AI
+service (each connection is tested before it's saved) and offers to download the latest month of prices and
+demand. After that, ask away: for example "How volatile were South Australian prices last month?". If a
+question needs data you haven't downloaded, the assistant asks before downloading it.
+
+Everything nembot stores lives in `data/` (the database and downloaded files) and
+`~/.config/nembot/credentials.toml` (your keys, readable only by you).
+
+## Data loader
+
+Besides the chat, `load_mms` and the `nembot` command load AEMO MMS tables directly. They download AEMO's
+monthly MMSDM archive ZIPs, strictly validate the MMS C/I/D CSV format and load the data into DuckDB. Any table
+in AEMO's monthly archive can be loaded; DUDETAILSUMMARY is loaded as effective-dated reference history.
 
 ## Python API
 
@@ -26,7 +50,7 @@ connection = load_mms(
 connection.close()
 ```
 
-- `tables` — list of MMS table names (the four above).
+- `tables` — list of MMS table names (any table in AEMO's monthly archive).
 - `start_date` / `end_date` — inclusive calendar dates (UTC+10 market days) as
   `YYYY-MM-DD` strings or `datetime.date`; omit both to load the latest three
   complete published months.
@@ -50,8 +74,8 @@ TOML config accepts the same keys (`tables`, `start`, `end`, `database`,
 uv run nembot-chat   # http://127.0.0.1:8000
 ```
 
-A localhost chat analyst over `data/nem.duckdb` (opened read-only) that
-answers with SQL tables and interactive Vega-Lite plots.
+A localhost chat analyst over `data/nem.duckdb` that answers with SQL tables and interactive Vega-Lite plots.
+Its queries are read-only.
 
 On first run the app opens a **Settings** page to connect an AI service. The
 model must support tool calling, and each connection is tested before it's
@@ -67,7 +91,9 @@ Keys are saved in `~/.config/nembot/credentials.toml` (readable only by you), or
 in the system keychain after `uv sync --extra keyring`. Environment variables
 (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`,
 `DEEPSEEK_API_KEY`) take priority. The page also offers to download the latest
-month of prices and demand to start with. Pick the model next to the chat input. You can switch models mid-conversation; text-only
+month of prices and demand to start with.
+
+Pick the model, and its reasoning level, next to the chat input. You can switch models mid-conversation; text-only
 models still make plots but can't see them. A **Web search** toggle lets the
 model search the web for context (billed per search); sources are listed under
 the reply. Flags: `--database`, `--host`,
@@ -195,6 +221,17 @@ holds the database open for writing, so stop it before using the CLI.
 - This build performs a single run and exits; there is no automatic polling.
   Data freshness is bounded by AEMO's monthly publication schedule.
 
+## Known issues
+
+- **A download can stall.** Once, after the app had run for many hours, a download stopped in its load step
+  and never finished; restarting `nembot-chat` fixed it, and it couldn't be reproduced. If a download sits on
+  one file for minutes with no progress, run `kill -USR1 <pid of nembot-chat>`: the app prints what every
+  thread is doing to its terminal (without stopping). Please include that output when you report it, then
+  restart the app; finished files are kept.
+- **marimo's AI background** lists the tables downloaded when nembot started its marimo server. Restart
+  nembot to include tables downloaded since.
+- **Live editing** of open notebooks works for marimo only; for Jupyter the assistant rewrites the notebook.
+
 ## Data source and terms
 
 > Contains data from the Australian Energy Market Operator (AEMO), published on
@@ -214,6 +251,25 @@ Downloads are polite but not slow:
 - on errors it drops to one request at a time with backoff (honouring
   `Retry-After`), and it stops after repeated HTTP 403s
 - listings are cached for an hour and files are never downloaded twice
+
+## Licence
+
+- **Code:** [PolyForm Noncommercial License 1.0.0](LICENSE). nembot is free to use, change and share for any
+  non-commercial purpose, including personal projects, research, education, charities and government. Any
+  commercial use (by or for a business, including internal use) needs a commercial licence: contact Jack
+  Devine at jack.neville.devine@gmail.com. This is a source-available licence, not an OSI open-source one.
+- **Documentation** (this README and the guides nembot gives its assistants, except the parts marked as adapted
+  from marimo): [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+- **AEMO content:** the table and column descriptions in `src/nembot/catalog.json` come from AEMO's Electricity
+  Data Model Report, and the data you download comes from NEMWEB; both remain AEMO's and are used under AEMO's
+  terms (see "Data source and terms" above). They are not licensed by nembot, and the Data Model Report does not
+  permit commercialising its contents.
+- **Third-party code and text** keep their own licences: see `LICENSES/` and the acknowledgements below.
+
+## Contributing
+
+Bug reports, questions and suggestions are very welcome as GitHub issues. For now nembot doesn't accept pull
+requests; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Acknowledgements
 

@@ -318,3 +318,15 @@ Completed: directory inspection; one monthly price ZIP download and CRC check; i
 Not completed or claimed: downloading a full monthly bundle; testing HTTP resume; validating every table or historical year; runtime testing NEMOSIS/nemdata; building a production ingestion pipeline. Only this research document was added to the project; no dependencies or application code were changed.
 
 Additional SCADA smoke check: a temporary script downloaded the same daily archive, validated outer/inner ZIP CRCs, and parsed every CSV. Its initial three-column schema assumption failed because the actual header also includes `LASTCHANGED`; after matching the observed four-column schema, validation passed for **137,083 data rows, 476 DUIDs and 288 five-minute timestamps**, spanning **2025-09-06 00:05:00 to 2025-09-07 00:00:00**. Every data row matched `DISPATCH/UNIT_SCADA` version 1, had the expected width, a parseable timestamp, nonempty DUID and numeric SCADAVALUE. The temporary script was removed automatically. This tests that sample day, not all historical schema versions.
+
+## Download speed and politeness (2026-10-20)
+Research findings:
+- None of the six NEMWEB tools reviewed sleeps between requests. OpenElectricity downloads 3 files in parallel; the others mostly run sequentially.
+- NEMWEB has no robots.txt and no published rate limit. It sits behind Azure Front Door with caching disabled, so every request reaches AEMO's server.
+
+What changed:
+- Connections are now reused.
+- 2 concurrent requests by default (cap 3), with AutoThrottle-style pacing.
+- Errors drop the downloader to one request at a time with backoff; repeated 403s stop the run.
+
+Result: 120 five-minute DispatchIS files took **4.9 s, down from about 2.5 minutes** (0.04 s per file).

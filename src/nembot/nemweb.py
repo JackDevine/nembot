@@ -29,7 +29,7 @@ from .tables import Table
 
 ROOT = 'https://www.nemweb.com.au/Data_Archive/Wholesale_Electricity/MMSDM/'
 
-# Courtesy towards AEMO, balanced against speed (see plan.md for the research):
+# Courtesy towards AEMO, balanced against speed (see NEMWEB_RESEARCH.md):
 # - Connections are reused (a shared urllib3 pool), so small files don't pay a
 #   TLS handshake each. Other NEMWEB tools open a new connection per file.
 # - At most CONCURRENCY requests run at once: 2 by default, never more than 3

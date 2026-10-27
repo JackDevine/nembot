@@ -6,7 +6,7 @@ Anthropic client and drops the cached model list, so no restart is needed.
 
 The Claude plan provider (subscription.py) is opt-in: it's only offered with
 ``claude_plan = true`` in the config, because Anthropic doesn't allow third-party
-apps to offer claude.ai login without approval (see plan.md, Licensing).
+apps to offer claude.ai login without approval.
 """
 import asyncio
 import os

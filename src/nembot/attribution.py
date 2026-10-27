@@ -1,8 +1,8 @@
 """How nembot credits AEMO, its data source.
 
 AEMO's Copyright Permissions allow use of AEMO material for any purpose with
-accurate attribution to AEMO as author. Some older AEMO documents are stricter
-(see plan.md, "Licensing"), so this text also disclaims endorsement and warranty.
+accurate attribution to AEMO as author. Some older AEMO documents are stricter,
+so this text also disclaims endorsement and warranty.
 """
 
 COPYRIGHT_URL = 'https://www.aemo.com.au/privacy-and-legal-notices/copyright-permissions'

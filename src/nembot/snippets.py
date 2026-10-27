@@ -1,7 +1,7 @@
 """Saved query/plot snippets in the `snippets` schema, re-run on every load.
 
 TODO: snippets from multiple users (ownership, per-user schemas or a user
-column, sharing) — see plan.md.
+column, sharing) — see ROADMAP.md.
 """
 from datetime import datetime
 import json

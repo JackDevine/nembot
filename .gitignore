@@ -23,3 +23,6 @@ plugins/*/data/
 
 # The private eval set and its tooling: a separate git repository (see plugins/evals/CLAUDE.md)
 plugins/evals/
+
+# Private planning notes (kept out of the public repository)
+plan.md

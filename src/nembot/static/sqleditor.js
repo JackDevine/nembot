@@ -160,7 +160,7 @@ async function drawSqlEditor(table) {
       if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
       const count = data.truncated ? `First ${data.rows.length.toLocaleString()} rows (there are more: aggregate or add a LIMIT)`
         : `${data.rows.length.toLocaleString()} row${data.rows.length === 1 ? '' : 's'}`;
-      results.replaceChildren(el('div', 'muted sql-meta', `${count} · ${data.seconds}s`),
+      results.replaceChildren(el('div', 'muted sql-meta', `${count} · ${formatSeconds(data.seconds)}`),
         createDataTable({ columns: data.columns.map(name => ({ name })), rows: data.rows, total: data.rows.length,
           exportName: `nembot-${table.toLowerCase()}-query` }));
       snippetPayload.sql = sql;

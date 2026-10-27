@@ -18,6 +18,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import io
 import json
+import time as time_module  # `time` is the datetime type imported above
 from typing import AsyncIterator
 
 import altair
@@ -300,6 +301,7 @@ class Result:
     sql: str
     columns: list[str]
     rows: list[tuple]
+    seconds: float = 0.0  # wall-clock time to run the query and fetch every row
 
 
 def _jsonable(value):
@@ -329,8 +331,10 @@ def run_query(db: duckdb.DuckDBPyConnection, sql: str) -> Result | str:
         statements = cursor.extract_statements(sql)
         if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
             return 'Only one SELECT query is allowed.'
+        started = time_module.perf_counter()
         relation = cursor.sql(sql)
-        return Result(sql, relation.columns, relation.fetchall())
+        rows = relation.fetchall()
+        return Result(sql, relation.columns, rows, time_module.perf_counter() - started)
     except Exception as err:
         return f'Query failed: {err}'
     finally:
@@ -373,6 +377,7 @@ def table_event(result: Result) -> dict:
     return {
         'type': 'table', 'sql': result.sql, 'columns': result.columns, 'total': len(result.rows),
         'rows': [[_jsonable(v) for v in row] for row in result.rows[:TABLE_ROWS]],
+        'query_seconds': round(result.seconds, 3),
     }
 
 
@@ -400,12 +405,14 @@ def visualize_tool(db, sql: str, plot_spec: str) -> tuple[str, str | None, list[
     if not result.rows:
         return 'The query returned no rows. Adjust the SQL before plotting.', None, [table_event(result)]
     try:
+        started = time_module.perf_counter()
         full = chart_spec(spec, _records(result))
         png = vl_convert.vegalite_to_png(full, scale=1)
+        render_seconds = time_module.perf_counter() - started
     except Exception as err:
         return f'Plot rendering failed: {err}. Revise the specification and retry.', None, []
     text = f'Plot created from all {len(result.rows)} rows. First 10 rows:\n{_preview(result)}'
-    return text, base64.standard_b64encode(png).decode(), [plot_event(sql, spec, full, result)]
+    return text, base64.standard_b64encode(png).decode(), [plot_event(sql, spec, full, result, render_seconds)]
 
 
 def chart_spec(plot_spec: dict, records: list[dict]) -> dict:
@@ -421,11 +428,14 @@ def chart_spec(plot_spec: dict, records: list[dict]) -> dict:
     return full
 
 
-def plot_event(sql: str, plot_spec: dict, full: dict, result: Result) -> dict:
+def plot_event(sql: str, plot_spec: dict, full: dict, result: Result, render_seconds: float | None = None) -> dict:
+    """``render_seconds``: building the chart spec with the data (and, in the chat, the PNG the model sees)."""
     # The data travels with the plot (shown under its SQL), not as a separate table at the end of the turn.
     table = table_event(result)
     return {'type': 'plot', 'sql': sql, 'spec': full, 'plot_spec': plot_spec,
-            'columns': table['columns'], 'rows': table['rows'], 'total': table['total']}
+            'columns': table['columns'], 'rows': table['rows'], 'total': table['total'],
+            'query_seconds': table['query_seconds'],
+            'render_seconds': round(render_seconds, 3) if render_seconds is not None else None}
 
 
 def rerun_chart(db, sql: str, plot_spec) -> dict:
@@ -438,7 +448,9 @@ def rerun_chart(db, sql: str, plot_spec) -> dict:
     if isinstance(result, str):
         return {'error': result}
     try:
-        return plot_event(sql, spec, chart_spec(spec, _records(result)), result)
+        started = time_module.perf_counter()
+        full = chart_spec(spec, _records(result))
+        return plot_event(sql, spec, full, result, time_module.perf_counter() - started)
     except Exception as err:
         return {'error': f'Plot failed: {err}'}
 

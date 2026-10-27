@@ -6,6 +6,7 @@ column, sharing) — see plan.md.
 from datetime import datetime
 import json
 import re
+import time
 
 import duckdb
 
@@ -116,8 +117,11 @@ def run(db, snippet: dict) -> dict:
     events = [table_event(result)]
     if snippet['plot_spec']:
         try:
+            started = time.perf_counter()
             full = chart_spec(snippet['plot_spec'], _records(result))
-            events.insert(0, {'type': 'plot', 'sql': snippet['sql'], 'spec': full, 'plot_spec': snippet['plot_spec']})
+            events.insert(0, {'type': 'plot', 'sql': snippet['sql'], 'spec': full, 'plot_spec': snippet['plot_spec'],
+                              'query_seconds': round(result.seconds, 3),
+                              'render_seconds': round(time.perf_counter() - started, 3)})
         except Exception as exc:
             return {'error': f'Plot failed: {exc}', 'events': events}
     return {'error': None, 'events': events, 'ran_at': datetime.now().isoformat(sep=' ', timespec='seconds')}

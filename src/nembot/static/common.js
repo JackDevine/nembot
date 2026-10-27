@@ -136,9 +136,18 @@ function renderInlineMarkdown(text) {
 function escapeTildes(text) { return text.replace(/(^|[^~\\])~(?!~)/g, '$1\\~'); }
 
 // ``actions`` (optional) is an element placed next to the SQL, e.g. an "Add to snippets" button.
+// Wall-clock time of the query (and the chart build, for plots), as shown in their summary line.
+function formatSeconds(s) { return s < 0.1 ? `${Math.max(1, Math.round(s * 1000))} ms` : `${s.toFixed(s < 10 ? 2 : 1)} s`; }
+function timing(event) {
+  const parts = [];
+  if (event.query_seconds != null) parts.push(event.render_seconds != null ? `query ${formatSeconds(event.query_seconds)}` : formatSeconds(event.query_seconds));
+  if (event.render_seconds != null) parts.push(`chart ${formatSeconds(event.render_seconds)}`);
+  return parts.length ? ` · ${parts.join(', ')}` : '';
+}
+
 function renderTable(event, actions) {
   const wrap = el('div', 'result-table');
-  if (event.sql) wrap.append(withActions(sqlBlock('SQL query', event.sql), actions, event.result_id));
+  if (event.sql) wrap.append(withActions(sqlBlock(`SQL query${timing(event)}`, event.sql), actions, event.result_id));
   else if (actions) wrap.append(actions);
   wrap.append(createDataTable({
     columns: event.columns.map(name => ({ name })),
@@ -198,7 +207,7 @@ function renderPlot(event, actions) {
   query.append(codeBlock(event.sql, 'sql'));
   if (event.columns) query.append(createDataTable({ columns: event.columns.map(name => ({ name })), rows: event.rows,
     total: event.total, exportName: event.result_id ? `nembot-${event.result_id}` : 'nembot-plot-data' }));
-  wrap.append(withActions(details(event.columns ? 'Plot SQL and data' : 'Plot SQL', query), actions, event.result_id),
+  wrap.append(withActions(details(`${event.columns ? 'Plot SQL and data' : 'Plot SQL'}${timing(event)}`, query), actions, event.result_id),
     details('Plot specification', spec));
   const target = el('div');
   wrap.append(target);

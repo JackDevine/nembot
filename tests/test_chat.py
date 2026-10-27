@@ -143,6 +143,20 @@ class DatabaseCase(unittest.TestCase):
         return asyncio.run(collect())
 
 
+class Timings(DatabaseCase):
+    def test_queries_and_plots_report_wall_clock_times(self):
+        _, _, (table,) = query_tool(self.db, 'SELECT 1 AS x')
+        self.assertIsInstance(table['query_seconds'], float)
+        self.assertGreaterEqual(table['query_seconds'], 0)
+        spec = json.dumps({'mark': 'point', 'encoding': {'x': {'field': 'x', 'type': 'quantitative'}}})
+        _, png, (plot,) = visualize_tool(self.db, 'SELECT range AS x FROM range(10)', spec)
+        self.assertTrue(png)
+        self.assertGreater(plot['render_seconds'], 0)  # building the chart and its PNG takes measurable time
+        self.assertIsInstance(plot['query_seconds'], float)
+        rerun = rerun_chart(self.db, 'SELECT range AS x FROM range(10)', json.loads(spec))
+        self.assertIsInstance(rerun['render_seconds'], float)
+
+
 class LargePlots(DatabaseCase):
     def test_every_row_is_plotted_without_validating_each_one(self):
         spec = json.dumps({'mark': 'line', 'encoding': {'x': {'field': 'i', 'type': 'quantitative'},

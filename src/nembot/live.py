@@ -171,7 +171,7 @@ def load(db: duckdb.DuckDBPyConnection, table: str, files: list[dict], cache_dir
                 c.execute('BEGIN')
                 try:
                     with tempfile.TemporaryDirectory(dir=scratch) as normalized:
-                        _load_file(c, schema, table, path, Path(normalized), url, required=False)
+                        _load_file(c, schema, table, path, Path(normalized), url, required=False, report=report)
                     _mark(c, table, url, digest, *window)
                     c.execute('COMMIT')
                 except BaseException:

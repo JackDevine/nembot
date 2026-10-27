@@ -37,6 +37,7 @@ class Job:
     status: str = 'queued'  # queued, running, done, failed, cancelled
     progress: dict = field(default_factory=dict)
     error: str | None = None
+    notes: list = field(default_factory=list)  # e.g. decimals rounded to the data model's scale
     created: float = field(default_factory=time.time)
     finished: float | None = None
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -44,7 +45,7 @@ class Job:
     def public(self) -> dict:
         return {'id': self.id, 'table': self.table, 'start': self.start.isoformat(), 'end': self.end.isoformat(),
                 'reason': self.reason, 'kind': self.kind, 'status': self.status, 'progress': self.progress, 'error': self.error,
-                'created': self.created, 'finished': self.finished}
+                'notes': self.notes, 'created': self.created, 'finished': self.finished}
 
 
 def month_range(start: str, end: str) -> tuple[date, date]:
@@ -106,6 +107,9 @@ class Downloads:
             job.status = 'running'
 
             def progress(event, job=job):
+                if event.get('stage') == 'note':
+                    job.notes.append(f"{event['url'].rsplit('/', 1)[-1]}: {event['note']}")
+                    return
                 job.progress = event
 
             try:

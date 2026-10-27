@@ -194,7 +194,14 @@ function drawTable() {
   } else if (d.time_column) {
     fact('Time column', d.time_column);
   }
-  tableView.append(facts, el('div', 'job-slot'));
+  tableView.append(facts);
+  // Decimals AEMO published with more places than its data model documents, rounded on load.
+  if (d.notes?.length) {
+    const list = el('ul', 'load-notes');
+    for (const n of d.notes) list.append(el('li', '', `${n.file}: ${n.note}`));
+    tableView.append(details(`Loading notes (${d.notes.length}): some values were rounded to the documented decimal places`, list));
+  }
+  tableView.append(el('div', 'job-slot'));
   drawJobSlot();
   tableView.append(docsPanel(d));
 

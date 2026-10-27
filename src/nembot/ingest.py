@@ -160,8 +160,28 @@ def _mark(c, name, url, digest, lower, upper):
     c.execute('INSERT INTO _nembot.files VALUES (?, ?, ?, ?, ?, current_timestamp) ON CONFLICT DO NOTHING', [url, digest, name, lower, upper])
 
 
-def _load_file(c, table, target, path, directory, url, lower=None, upper=None, required=True):
-    normalized = nemweb.normalize(path, table, directory, url, required=required)
+def _note_rounding(c, table, url, rounded: dict) -> list[str]:
+    """Record decimals rounded to the data model's scale for this file (shown in the Explorer and jobs)."""
+    c.execute('CREATE TABLE IF NOT EXISTS _nembot.notes (url VARCHAR, table_name VARCHAR, note VARCHAR, '
+              'created_at TIMESTAMP, PRIMARY KEY(url, table_name, note))')
+    notes = []
+    for column, count in sorted(rounded.items()):
+        note = (f"rounded {count:,} {column} value{'s' if count != 1 else ''} to {table.columns[column]}: "
+                "AEMO's file has more decimal places than its data model documents")
+        c.execute('INSERT INTO _nembot.notes VALUES (?, ?, ?, current_timestamp) ON CONFLICT DO NOTHING',
+                  [url, table.name, note])
+        print(f'{table.name}: {note} ({url})', flush=True)
+        notes.append(note)
+    return notes
+
+
+def _load_file(c, table, target, path, directory, url, lower=None, upper=None, required=True, report=None):
+    rounded = {}
+    normalized = nemweb.normalize(path, table, directory, url, required=required, rounded=rounded)
+    if rounded:
+        for note in _note_rounding(c, table, url, rounded):
+            if report is not None:
+                report({'stage': 'note', 'table': table.name, 'url': url, 'note': note})
     for csv_path, supplied, context in normalized:
         if lower is None:
             _merge(c, table, target, csv_path, supplied, context)
@@ -279,9 +299,9 @@ def load_mms(
                     try:
                         with tempfile.TemporaryDirectory(dir=scratch) as normalized:
                             if name in EXACT_WINDOW:
-                                _load_file(c, TABLES[name], name, path, Path(normalized), url, lower, upper)
+                                _load_file(c, TABLES[name], name, path, Path(normalized), url, lower, upper, report=report)
                             else:
-                                _load_file(c, TABLES[name], name, path, Path(normalized), url)
+                                _load_file(c, TABLES[name], name, path, Path(normalized), url, report=report)
                         _mark(c, name, url, digest, *window)
                         c.execute('COMMIT')
                     except BaseException:
@@ -299,7 +319,7 @@ def load_mms(
                         c.execute('INSERT INTO _reference SELECT * FROM DUDETAILSUMMARY')
                         for path, digest, url in references:
                             with tempfile.TemporaryDirectory(dir=scratch) as normalized:
-                                _load_file(c, table, '_reference', path, Path(normalized), url)
+                                _load_file(c, table, '_reference', path, Path(normalized), url, report=report)
                         match = ' AND '.join(f't.{_q(k)}=s.{_q(k)}' for k in table.primary_key)
                         updates = ', '.join(f'{_q(k)}=s.{_q(k)}' for k in table.columns if k not in table.primary_key)
                         all_columns = ', '.join(map(_q, table.columns))

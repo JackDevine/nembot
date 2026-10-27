@@ -5,7 +5,7 @@ import concurrent.futures
 from contextlib import ExitStack
 import csv
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 import hashlib
 from html.parser import HTMLParser
 from http.client import HTTPException
@@ -413,31 +413,40 @@ def download_many(urls: Sequence[str], cache_dir: Path, progress: Callable[[str,
                 future.cancel()
 
 
-def _value(value: str, kind: str) -> None:
-    """Reject incompatible supplied values even outside the requested date range."""
+def _value(value: str, kind: str) -> str | None:
+    """Reject incompatible supplied values even outside the requested date range.
+
+    Returns a replacement when a DECIMAL has more fractional digits than the data model documents:
+    AEMO's files sometimes do (e.g. CUMUL_PRE_AP_ENERGY_PRICE in 2024 DISPATCHPRICE has 6 places for a
+    documented 5). Those are rounded half up, as AEMO's Oracle NUMBER(p,s) columns store them, and
+    the caller reports how many values were rounded. Anything else invalid still raises.
+    """
     if not value or kind == 'VARCHAR':
-        return
+        return None
     if kind == 'DOUBLE':
         if not math.isfinite(float(value)):
             raise ValueError('non-finite number')
-        return
+        return None
     if kind == 'TIMESTAMP':
         # TIMESTAMP(n) columns carry fractional seconds, e.g. 2023/03/15 08:56:34.657.
         if not re.fullmatch(r'[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?', value):
             raise ValueError('expected YYYY/MM/DD HH:MM:SS[.fff]')
         datetime.fromisoformat(value.replace('/', '-'))
-        return
+        return None
     number = Decimal(value)
     if not number.is_finite():
         raise ValueError('non-finite decimal')
     precision, scale = map(int, kind.removeprefix('DECIMAL(').removesuffix(')').split(','))
     if abs(number) >= Decimal(10) ** (precision - scale):
         raise ValueError(f'number exceeds {kind}')
-    # No silent rounding of excess nonzero fractional digits.
     _, digits, exponent = number.as_tuple()
     excess = -exponent - scale
     if excess > 0 and any(digits[max(0, len(digits) - excess):]):
-        raise ValueError(f'number has excess fractional digits for {kind}')
+        rounded = number.quantize(Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)
+        if abs(rounded) >= Decimal(10) ** (precision - scale):
+            raise ValueError(f'number exceeds {kind} after rounding')
+        return str(rounded)
+    return None
 
 
 def _csv_members(source: zipfile.ZipFile, prefix: str = ''):
@@ -459,11 +468,12 @@ def _csv_members(source: zipfile.ZipFile, prefix: str = ''):
 
 
 def normalize(archive: Path, table: Table, directory: Path, url: str,
-              required: bool = True) -> list[tuple[Path, tuple[str, ...], str]]:
+              required: bool = True, rounded: dict | None = None) -> list[tuple[Path, tuple[str, ...], str]]:
     """Validate complete C/I/D members, returning one CSV per selected table version and header.
 
     With ``required=False`` an archive without the table yields no outputs
     instead of failing (report files carry several tables, not always all).
+    ``rounded`` (column -> count) collects decimals rounded to the data model's scale (see _value).
     """
     outputs = []
     writers = {}  # (version, header columns) -> header details, shared across members
@@ -540,11 +550,15 @@ def normalize(archive: Path, table: Table, directory: Path, url: str,
                                 if row[position] == '':
                                     raise RuntimeError(f'{context}: NULL primary key column {key}')
                             values = [row[position] for position in order]
-                            for name, value in zip(supplied, values):
+                            for index, (name, value) in enumerate(zip(supplied, values)):
                                 try:
-                                    _value(value, table.columns[name])
+                                    replacement = _value(value, table.columns[name])
                                 except (ValueError, InvalidOperation) as exc:
                                     raise RuntimeError(f'{context} / column {name}: invalid {table.columns[name]} value {value!r}: {exc}') from exc
+                                if replacement is not None:
+                                    values[index] = replacement
+                                    if rounded is not None:
+                                        rounded[name] = rounded.get(name, 0) + 1
                             writer.writerow(values)
                         else:
                             raise RuntimeError(f'{context}: unexpected selected record kind {row[0]!r}')

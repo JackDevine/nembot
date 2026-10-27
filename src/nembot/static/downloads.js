@@ -125,6 +125,10 @@ function jobPanel(table) {
     const cancel = el('button', '', 'Cancel');
     cancel.onclick = () => { cancel.disabled = true; cancelDownload(job.id); };
     panel.append(el('div', '', `${job.table}: ${jobRange(job)}`), bar, el('div', 'muted', jobSummary(job)), cancel);
+    if (job.notes?.length) {
+      panel.append(el('div', 'muted', `Rounded extra decimal places in ${job.notes.length} file${job.notes.length === 1 ? '' : 's'} `
+        + '(AEMO published more places than its data model documents); details on the table page.'));
+    }
   }
   return panel;
 }

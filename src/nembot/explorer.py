@@ -309,6 +309,10 @@ def table(db: duckdb.DuckDBPyConnection, name: str) -> dict | None:
             if files[0]:
                 result['files'] = {'count': files[0], 'first': _jsonable(files[1]), 'last': _jsonable(files[2]),
                                    'window': [_jsonable(files[3]), _jsonable(files[4])]}
+        if cursor.execute("SELECT count(*) FROM duckdb_tables() WHERE schema_name = '_nembot' "
+                          "AND table_name = 'notes'").fetchone()[0]:
+            result['notes'] = [{'file': url.rsplit('/', 1)[-1], 'note': note} for url, note in cursor.execute(
+                'SELECT url, note FROM _nembot.notes WHERE table_name = ? ORDER BY url, note', [name]).fetchall()]
         for filter_column in FILTER_COLUMNS:
             if filter_column == 'REGIONID' and any(c['name'] == filter_column for c in entry['columns']):
                 values = cursor.execute(f'SELECT DISTINCT {_q(filter_column)} FROM {_q(name)} '

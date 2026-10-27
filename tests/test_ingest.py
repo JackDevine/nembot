@@ -314,6 +314,28 @@ class IngestTests(unittest.TestCase):
                 self.assertEqual(self.stored("SELECT count(*) FROM DISPATCHPRICE"), [(0,)])
                 self.assertEqual(self.stored("SELECT count(*) FROM _nembot.files"), [(0,)])
 
+    def test_extra_decimal_places_are_rounded_half_up_and_noted(self):
+        # AEMO's 2024 DISPATCHPRICE files carry 6 decimals in a column documented with 5.
+        self.network.add_file("DISPATCHPRICE", 2024, 2, [
+            price_row("2024/02/01 00:05:00", RRP="42.1234550000000000000"),  # a 6th place: rounds half up
+            price_row("2024/02/01 00:10:00", RRP="-1.000004"),  # rounds towards zero
+            price_row("2024/02/01 00:15:00", RRP="7.25000000000"),  # extra zeros only: unchanged, not noted
+        ])
+        with self.load(end="2024-02-01") as connection:
+            prices = connection.execute("SELECT RRP FROM DISPATCHPRICE ORDER BY SETTLEMENTDATE").fetchall()
+            notes = connection.execute("SELECT table_name, note FROM _nembot.notes").fetchall()
+        self.assertEqual([p[0] for p in prices], [Decimal("42.12346"), Decimal("-1.00000"), Decimal("7.25000")])
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0][0], "DISPATCHPRICE")
+        self.assertIn("rounded 2 RRP values to DECIMAL(15,5)", notes[0][1])
+        self.assertIn("rounded 2 RRP values", self.stdout.getvalue())
+
+    def test_values_too_big_after_rounding_are_still_rejected(self):
+        self.network.add_file("DISPATCHPRICE", 2024, 2, [price_row(RRP="9999999999.999995")])
+        with self.assertRaisesRegex(RuntimeError, "exceeds DECIMAL"):
+            self.load(end="2024-02-01")
+        self.assertEqual(self.stored("SELECT count(*) FROM _nembot.files"), [(0,)])
+
     def test_narrow_then_wide_and_fresh_database_reuse_cached_files(self):
         self.network.add_file("DISPATCHPRICE", 2024, 2, [
             price_row("2024/02/01 00:05:00"), price_row("2024/02/02 00:05:00"),

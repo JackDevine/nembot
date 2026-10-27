@@ -17,7 +17,7 @@ service that supports tool calling: an OpenRouter or Anthropic account, an OpenA
 models running locally with Ollama or LM Studio.
 
 ```bash
-git clone <this repository's URL> nembot
+git clone https://github.com/JackDevine/nembot.git
 cd nembot
 uv run nembot-chat
 ```

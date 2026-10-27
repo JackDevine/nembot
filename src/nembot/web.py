@@ -3,9 +3,11 @@ import argparse
 from decimal import Decimal
 import asyncio
 import contextlib
+import faulthandler
 import json
 import logging
 from pathlib import Path
+import signal
 from urllib.parse import quote, urlsplit
 
 import anthropic
@@ -811,6 +813,9 @@ def create_app(database: str, cache_dir: str = 'data/cache', url: str = 'http://
 
 
 def main() -> None:
+    # `kill -USR1 <pid>` prints every thread's stack to stderr without stopping the server, to diagnose
+    # a stuck download or request (attaching a debugger to a running process is often not allowed).
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
     parser = argparse.ArgumentParser(description='Serve the NEM analyst chat on localhost.')
     parser.add_argument('--database', default='data/nem.duckdb', metavar='PATH')
     parser.add_argument('--cache-dir', default='data/cache', metavar='PATH')
